@@ -48,8 +48,8 @@ class PackagesViewModel : ViewModel() {
         }
     }
 
-    fun setFilter(value: PackageFilter) { filter = value }
-    fun setQuery(value: String) { query = value }
+    fun updateFilter(value: PackageFilter) { filter = value }
+    fun updateQuery(value: String) { query = value }
     fun consumeMessage() { message = null }
 
     fun filtered(): List<AppPackage> {

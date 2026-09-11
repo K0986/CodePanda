@@ -69,7 +69,7 @@ fun BloatwareScreen(viewModel: BloatwareViewModel = viewModel()) {
             Row(Modifier.fillMaxWidth().padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
                 OutlinedTextField(
                     value = viewModel.query,
-                    onValueChange = viewModel::setQuery,
+                    onValueChange = viewModel::updateQuery,
                     leadingIcon = { Icon(Icons.Filled.Search, null) },
                     placeholder = { Text("Search apps") },
                     singleLine = true,

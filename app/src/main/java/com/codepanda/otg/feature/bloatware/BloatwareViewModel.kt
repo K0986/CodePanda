@@ -39,7 +39,7 @@ class BloatwareViewModel : ViewModel() {
         }
     }
 
-    fun setQuery(value: String) { query = value }
+    fun updateQuery(value: String) { query = value }
     fun toggleKnownOnly() { knownOnly = !knownOnly }
     fun consumeMessage() { message = null }
 
