@@ -69,7 +69,7 @@ fun BloatwareScreen(viewModel: BloatwareViewModel = viewModel()) {
             Row(Modifier.fillMaxWidth().padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
                 OutlinedTextField(
                     value = viewModel.query,
-                    onValueChange = viewModel::setQuery,
+                    onValueChange = viewModel::updateQuery,
                     leadingIcon = { Icon(Icons.Filled.Search, null) },
                     placeholder = { Text("Search apps") },
                     singleLine = true,
@@ -110,10 +110,24 @@ fun BloatwareScreen(viewModel: BloatwareViewModel = viewModel()) {
     }
 
     uninstallTarget?.let { app ->
+        val reversibility =
+            "This uninstalls the app for the current user (user 0). It is reversible: \"Reinstall\" or a factory reset restores it."
         ConfirmDialog(
-            title = "Remove ${app.displayName}?",
-            message = "This uninstalls the app for the current user (user 0). It is reversible: a factory reset or \"reinstall\" restores it. System integrity is not affected.",
-            confirmLabel = "Remove",
+            title = when (app.safety) {
+                BloatSafety.UNSAFE -> "Do not remove ${app.displayName}"
+                BloatSafety.UNKNOWN -> "Remove ${app.displayName}?"
+                else -> "Remove ${app.displayName}?"
+            },
+            message = when (app.safety) {
+                BloatSafety.UNSAFE ->
+                    "${app.displayName} is a core system component. Removing it can leave the device unable to boot, " +
+                        "place calls or open Settings. $reversibility"
+                BloatSafety.UNKNOWN ->
+                    "This package is not in the safety catalog, so its role is unknown — it may be required by the " +
+                        "system or by your carrier. $reversibility"
+                else -> reversibility
+            },
+            confirmLabel = if (app.safety == BloatSafety.UNSAFE) "Remove anyway" else "Remove",
             onConfirm = { uninstallTarget = null; viewModel.uninstallForUser(app) },
             onDismiss = { uninstallTarget = null },
         )

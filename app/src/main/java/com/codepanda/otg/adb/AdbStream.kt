@@ -101,6 +101,9 @@ class AdbStream internal constructor(
     /**
      * Read up to [max] bytes. Returns `null` once the device has closed the
      * stream and all buffered data has been drained (i.e. EOF).
+     *
+     * Handing a chunk to the caller is also what releases the device to send the
+     * next one: see [ackConsumed].
      */
     fun read(max: Int = Int.MAX_VALUE): ByteArray? {
         val chunk = pending ?: run {
@@ -118,6 +121,7 @@ class AdbStream internal constructor(
             else chunk.copyOfRange(pendingOffset, chunk.size)
             pending = null
             pendingOffset = 0
+            ackConsumed()
             result
         } else {
             val slice = chunk.copyOfRange(pendingOffset, pendingOffset + max)
@@ -160,8 +164,26 @@ class AdbStream internal constructor(
     fun close() {
         if (closed) return
         closed = true
+        // Wake any reader blocked in take(); without this the consumer thread
+        // (e.g. the video decoder) would park forever, because the device's CLSE
+        // reply can no longer be routed to this stream once it is unregistered.
+        incoming.offer(EOF)
+        writeReady.release()
         runCatching { connection.sendMessage(AdbMessage.close(localId, remoteId)) }
         connection.unregister(localId)
+    }
+
+    /**
+     * Tell the device it may send the next `WRTE` on this stream.
+     *
+     * ADB allows only one unacknowledged `WRTE` per stream, so deferring this
+     * `OKAY` until the consumer has actually taken the payload is what bounds
+     * our memory use: acking on arrival instead lets a fast producer (a
+     * `screenrecord` feed, a file pull) queue up without limit.
+     */
+    private fun ackConsumed() {
+        if (closed) return
+        runCatching { connection.sendMessage(AdbMessage.okay(localId, remoteId)) }
     }
 
     companion object {

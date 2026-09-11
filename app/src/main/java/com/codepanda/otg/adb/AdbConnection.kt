@@ -122,6 +122,9 @@ class AdbConnection(
                 if (magic != (command xor -0x1)) {
                     throw AdbTransportException("corrupt header: magic mismatch")
                 }
+                if (dataLength < 0 || dataLength > AdbProtocol.MAX_PAYLOAD) {
+                    throw AdbTransportException("corrupt header: payload length $dataLength")
+                }
 
                 val payload = if (dataLength > 0) {
                     ByteArray(dataLength).also { transport.readFully(it, 0, dataLength) }
@@ -154,9 +157,10 @@ class AdbConnection(
             AdbProtocol.A_WRTE -> {
                 val stream = streams[message.arg1]
                 if (stream != null) {
+                    // Flow control: the OKAY is sent by the stream once a reader
+                    // takes the payload, which throttles the device to the speed
+                    // of our consumer instead of buffering without limit.
                     stream.onPayload(message.payload)
-                    // Flow control: acknowledge so the device keeps sending.
-                    sendMessage(AdbMessage.okay(message.arg1, message.arg0))
                 } else {
                     // No such stream — tell the device to stop.
                     sendMessage(AdbMessage.close(message.arg1, message.arg0))

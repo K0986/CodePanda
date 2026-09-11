@@ -54,8 +54,10 @@ object AdbProtocol {
     const val A_VERSION = 0x01000001
 
     /**
-     * Maximum payload we advertise. adbd negotiates down if it is older, but
-     * 256 KiB is safe for every adbd shipped since Android 4.x.
+     * Maximum payload we advertise, matching what `adb` itself advertises for
+     * protocol version [A_VERSION]. adbd negotiates down if it is older, and the
+     * value it reports back in its `CNXN` is what we actually honour when
+     * splitting writes.
      */
     const val MAX_PAYLOAD = 1024 * 1024
 

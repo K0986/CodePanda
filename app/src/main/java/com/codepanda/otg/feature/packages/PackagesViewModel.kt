@@ -48,8 +48,8 @@ class PackagesViewModel : ViewModel() {
         }
     }
 
-    fun setFilter(value: PackageFilter) { filter = value }
-    fun setQuery(value: String) { query = value }
+    fun updateFilter(value: PackageFilter) { filter = value }
+    fun updateQuery(value: String) { query = value }
     fun consumeMessage() { message = null }
 
     fun filtered(): List<AppPackage> {
@@ -111,6 +111,10 @@ class PackagesViewModel : ViewModel() {
         val repo = repo ?: return@runAction "No session"
         val resolver = context.contentResolver
         val size = querySize(context, uri)
+        // -S streaming needs an exact length; without it the install would hang.
+        if (size <= 0) {
+            return@runAction "Could not determine the APK's size. Save it to local storage first, then retry."
+        }
         resolver.openInputStream(uri)?.use { input ->
             repo.installStreaming(input, size).message
         } ?: "Could not open selected file"

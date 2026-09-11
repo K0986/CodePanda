@@ -57,16 +57,21 @@ class VideoDecoder(
                 val type = nal[0].toInt() and 0x1F
                 when (type) {
                     NAL_SPS -> {
+                        // A new, different SPS means the geometry changed (the
+                        // device rotated, or screenrecord restarted): the running
+                        // decoder is configured for the old size and would render
+                        // garbage, so rebuild it.
+                        if (codec != null && !nal.contentEquals(sps)) releaseCodec()
                         sps = nal
-                        if (pps != null && codec == null) configure(sps!!, pps!!)
+                        pps?.let { if (codec == null) configure(nal, it) }
                     }
                     NAL_PPS -> {
                         pps = nal
-                        if (sps != null && codec == null) configure(sps!!, pps)
+                        sps?.let { if (codec == null) configure(it, nal) }
                     }
                     else -> {
                         val mc = codec ?: continue // wait until configured
-                        feed(mc, nal)
+                        feed(mc, nal, bufferInfo)
                         drain(mc, bufferInfo)
                     }
                 }
@@ -93,14 +98,33 @@ class VideoDecoder(
         }
     }
 
-    private fun feed(mc: MediaCodec, nal: ByteArray) {
-        val index = mc.dequeueInputBuffer(TIMEOUT_US)
+    /**
+     * Queue one NAL unit. If every input buffer is busy we drain output to make
+     * room and try again: silently discarding the unit (as a plain `return`
+     * would) leaves the decoder with a hole in the bitstream and produces
+     * smeared, artefact-ridden frames.
+     */
+    private fun feed(mc: MediaCodec, nal: ByteArray, info: MediaCodec.BufferInfo) {
+        var index = mc.dequeueInputBuffer(TIMEOUT_US)
+        while (running && index < 0) {
+            drain(mc, info)
+            index = mc.dequeueInputBuffer(TIMEOUT_US)
+        }
         if (index < 0) return
         val input = mc.getInputBuffer(index) ?: return
+        val size = nal.size + START_CODE.size
+        if (input.capacity() < size) {
+            // Very large access unit (a keyframe at a high bitrate). Feeding a
+            // truncated NAL would corrupt the stream, so queue nothing and let
+            // the next keyframe resynchronise.
+            Log.w(TAG, "NAL of $size B exceeds input buffer of ${input.capacity()} B; skipping")
+            mc.queueInputBuffer(index, 0, 0, ptsFor(nal), 0)
+            return
+        }
         input.clear()
         input.put(START_CODE)
         input.put(nal)
-        mc.queueInputBuffer(index, 0, nal.size + START_CODE.size, computePts(), 0)
+        mc.queueInputBuffer(index, 0, size, ptsFor(nal), 0)
     }
 
     private fun drain(mc: MediaCodec, info: MediaCodec.BufferInfo) {
@@ -115,7 +139,16 @@ class VideoDecoder(
     }
 
     private var frameIndex = 0L
-    private fun computePts(): Long = (frameIndex++ * 1_000_000L) / 60L
+
+    /**
+     * Presentation timestamp for [nal]. Only coded picture NALs (types 1–5)
+     * advance the clock — counting parameter sets and SEI as frames would run
+     * the timeline ahead of the actual video.
+     */
+    private fun ptsFor(nal: ByteArray): Long {
+        if ((nal[0].toInt() and 0x1F) in NAL_VCL_RANGE) frameIndex++
+        return (frameIndex * 1_000_000L) / ASSUMED_FPS
+    }
 
     private fun releaseCodec() {
         codec?.let {
@@ -187,6 +220,8 @@ class VideoDecoder(
         private const val TIMEOUT_US = 10_000L
         private const val NAL_SPS = 7
         private const val NAL_PPS = 8
+        private val NAL_VCL_RANGE = 1..5
+        private const val ASSUMED_FPS = 60L
         private val START_CODE = byteArrayOf(0, 0, 0, 1)
     }
 }
