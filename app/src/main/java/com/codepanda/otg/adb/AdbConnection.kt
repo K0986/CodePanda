@@ -20,6 +20,14 @@ import java.util.concurrent.atomic.AtomicInteger
 class AdbConnection(
     private val transport: AdbTransport,
     private val crypto: AdbCrypto,
+    /**
+     * Invoked at most once, from the reader thread, when an established
+     * connection dies for a reason other than our own [close] — the target
+     * rebooted, adbd restarted, the user revoked the debugging authorisation.
+     * Without this the session state would stay "connected" while every
+     * subsequent operation failed with a cryptic low-level error.
+     */
+    private val onClosed: (Throwable?) -> Unit = {},
 ) {
     @Volatile
     var maxPayload: Int = 256 * 1024
@@ -39,6 +47,7 @@ class AdbConnection(
     @Volatile private var connectError: Throwable? = null
     @Volatile private var connected = false
     @Volatile private var running = false
+    @Volatile private var closedByUs = false
     private var authAttempts = 0
 
     private lateinit var readerThread: Thread
@@ -96,6 +105,7 @@ class AdbConnection(
     }
 
     fun close() {
+        closedByUs = true
         running = false
         connected = false
         streams.values.forEach { runCatching { it.onRemoteClose() } }
@@ -140,9 +150,16 @@ class AdbConnection(
                 connectError = connectError ?: t
             }
         } finally {
+            val wasConnected = connected
             connected = false
             if (connectedLatch.count > 0) connectedLatch.countDown()
             streams.values.forEach { runCatching { it.onRemoteClose() } }
+            // Only report an unexpected death: a failure during the handshake is
+            // already surfaced by connect() throwing, and our own close() is not
+            // news to anyone.
+            if (wasConnected && !closedByUs) {
+                runCatching { onClosed(connectError) }
+            }
         }
     }
 

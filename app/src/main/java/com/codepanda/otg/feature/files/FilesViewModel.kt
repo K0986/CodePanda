@@ -58,20 +58,21 @@ class FilesViewModel : ViewModel() {
     fun consumeMessage() { message = null }
 
     fun delete(item: FileItem) = runAction {
-        repo?.delete(item.absolutePath, recursive = item.isDirectory)
-        "Deleted ${item.name}"
+        // rm/mkdir/mv are silent on success, so any output is the device's error.
+        val output = repo?.delete(item.absolutePath, recursive = item.isDirectory)
+        if (output.isNullOrBlank()) "Deleted ${item.name}" else output
     }
 
     fun makeDirectory(name: String) = runAction {
         val path = joinPath(currentPath, name)
-        repo?.makeDirectory(path)
-        "Created $name"
+        val output = repo?.makeDirectory(path)
+        if (output.isNullOrBlank()) "Created $name" else output
     }
 
     fun rename(item: FileItem, newName: String) = runAction {
         val target = joinPath(currentPath, newName)
-        repo?.rename(item.absolutePath, target)
-        "Renamed to $newName"
+        val output = repo?.rename(item.absolutePath, target)
+        if (output.isNullOrBlank()) "Renamed to $newName" else output
     }
 
     fun pull(context: Context, item: FileItem) = runAction {

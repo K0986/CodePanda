@@ -68,7 +68,14 @@ class UsbAdbManager(private val context: Context) {
         scope.launch {
             try {
                 val transport = UsbDeviceScanner.openTransport(usbManager, device)
-                val connection = AdbConnection(transport, crypto)
+                val connection = AdbConnection(transport, crypto) { cause ->
+                    // The cable is still plugged in, so no DETACHED broadcast is
+                    // coming; without this the UI would keep showing a live
+                    // session over a dead connection.
+                    SessionManager.setFailed(
+                        cause?.message ?: "${displayName(device)} closed the connection.",
+                    )
+                }
                 connection.connect()
                 SessionManager.setConnected(
                     session = DeviceSession(connection),

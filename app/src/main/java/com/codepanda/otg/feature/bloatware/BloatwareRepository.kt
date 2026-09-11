@@ -40,20 +40,24 @@ class BloatwareRepository(private val shell: AdbShell) {
     }
 
     suspend fun disableForUser(pkg: String): CommandResult = withContext(Dispatchers.IO) {
-        CommandResult.from(shell.exec("pm disable-user --user 0 $pkg"))
+        runForResult("pm disable-user --user 0 $pkg")
     }
 
     suspend fun enable(pkg: String): CommandResult = withContext(Dispatchers.IO) {
-        CommandResult.from(shell.exec("pm enable $pkg"))
+        runForResult("pm enable $pkg")
     }
 
     suspend fun uninstallForUser(pkg: String): CommandResult = withContext(Dispatchers.IO) {
-        CommandResult.from(shell.exec("pm uninstall -k --user 0 $pkg"))
+        runForResult("pm uninstall -k --user 0 $pkg")
     }
 
     suspend fun reinstall(pkg: String): CommandResult = withContext(Dispatchers.IO) {
-        CommandResult.from(shell.exec("cmd package install-existing $pkg"))
+        runForResult("cmd package install-existing $pkg")
     }
+
+    /** Run a `pm` command and interpret its output, folding stderr into stdout. */
+    private fun runForResult(command: String): CommandResult =
+        CommandResult.from(shell.exec("$command 2>&1"))
 
     private fun names(output: String): Set<String> =
         output.lineSequence()

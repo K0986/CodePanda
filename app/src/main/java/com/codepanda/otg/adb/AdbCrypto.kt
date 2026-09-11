@@ -23,6 +23,12 @@ import javax.crypto.Cipher
  * "Allow USB debugging from this computer?" dialog. Once the user taps
  * "Always allow", adbd remembers the key and future connections skip the prompt
  * — which is exactly why we persist the key pair to disk.
+ *
+ * Note that this key is a **credential**: whoever holds it inherits debugging
+ * authorisation on every device the user has ever approved. It lives in the
+ * app's private storage, and the manifest sets `allowBackup="false"` so it is
+ * not eligible for `adb backup` extraction or cloud backup. Losing it costs one
+ * extra "Always allow" tap, which is a good trade.
  */
 class AdbCrypto private constructor(val keyPair: KeyPair) {
 

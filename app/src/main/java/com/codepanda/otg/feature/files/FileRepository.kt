@@ -59,25 +59,34 @@ class FileRepository(
 
     suspend fun delete(path: String, recursive: Boolean): String = withContext(Dispatchers.IO) {
         val flag = if (recursive) "-rf" else "-f"
-        shell.exec("rm $flag ${quote(path)}").trim()
+        run("rm $flag ${quote(path)}")
     }
 
     suspend fun makeDirectory(path: String): String = withContext(Dispatchers.IO) {
-        shell.exec("mkdir -p ${quote(path)}").trim()
+        run("mkdir -p ${quote(path)}")
     }
 
     suspend fun rename(from: String, to: String): String = withContext(Dispatchers.IO) {
-        shell.exec("mv ${quote(from)} ${quote(to)}").trim()
+        run("mv ${quote(from)} ${quote(to)}")
     }
 
     suspend fun copy(from: String, to: String): String = withContext(Dispatchers.IO) {
-        shell.exec("cp -r ${quote(from)} ${quote(to)}").trim()
+        run("cp -r ${quote(from)} ${quote(to)}")
     }
 
     suspend fun readTextPreview(path: String, maxBytes: Int = 64 * 1024): String =
         withContext(Dispatchers.IO) {
             shell.exec("head -c $maxBytes ${quote(path)}")
         }
+
+    /**
+     * Run a command whose *output* we interpret, folding stderr into stdout.
+     *
+     * `exec:` gives us stdout only, so without the redirect a failure like
+     * `rm: No such file or directory` arrives as an empty string — which the
+     * caller would read as success.
+     */
+    private fun run(command: String): String = shell.exec("$command 2>&1").trim()
 
     /** Wrap a path in single quotes, escaping any embedded single quotes. */
     private fun quote(path: String): String = "'" + path.replace("'", "'\\''") + "'"

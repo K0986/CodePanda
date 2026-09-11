@@ -13,5 +13,3 @@ local.properties
 *.aab
 /app/release
 /app/debug
-# Bundled third-party binaries fetched at setup time
-/app/src/main/assets/scrcpy-server

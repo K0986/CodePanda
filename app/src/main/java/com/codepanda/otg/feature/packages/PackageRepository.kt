@@ -58,35 +58,35 @@ class PackageRepository(
         withContext(Dispatchers.IO) {
             val cmd = if (enabled) "pm enable $packageName"
             else "pm disable-user --user 0 $packageName"
-            CommandResult.from(shell.exec(cmd))
+            runForResult(cmd)
         }
 
     suspend fun forceStop(packageName: String): CommandResult = withContext(Dispatchers.IO) {
         // am force-stop is silent on success, so treat empty output as success.
-        val out = shell.exec("am force-stop $packageName")
+        val out = shell.exec("am force-stop $packageName 2>&1").trim()
         if (out.isBlank()) CommandResult(true, "Force-stopped") else CommandResult.from(out)
     }
 
     suspend fun clearData(packageName: String): CommandResult = withContext(Dispatchers.IO) {
-        CommandResult.from(shell.exec("pm clear $packageName"))
+        runForResult("pm clear $packageName")
     }
 
     suspend fun uninstall(packageName: String, keepData: Boolean = false): CommandResult =
         withContext(Dispatchers.IO) {
             val keep = if (keepData) "-k " else ""
-            CommandResult.from(shell.exec("pm uninstall $keep$packageName"))
+            runForResult("pm uninstall $keep$packageName")
         }
 
     /** Remove a (bloatware) app for the current user without root. Reversible. */
     suspend fun uninstallForUser(packageName: String): CommandResult =
         withContext(Dispatchers.IO) {
-            CommandResult.from(shell.exec("pm uninstall -k --user 0 $packageName"))
+            runForResult("pm uninstall -k --user 0 $packageName")
         }
 
     /** Re-install a previously user-uninstalled system app for user 0. */
     suspend fun reinstallExisting(packageName: String): CommandResult =
         withContext(Dispatchers.IO) {
-            CommandResult.from(shell.exec("cmd package install-existing $packageName"))
+            runForResult("cmd package install-existing $packageName")
         }
 
     suspend fun apkPathsFor(packageName: String): List<String> = withContext(Dispatchers.IO) {
@@ -147,6 +147,16 @@ class PackageRepository(
             stream.close()
         }
     }
+
+    /**
+     * Run a `pm`/`am`-style command and interpret its output, folding stderr in.
+     *
+     * `exec:` exposes stdout only, so without the redirect a failure such as
+     * `Failure [DELETE_FAILED_INTERNAL_ERROR]` written to stderr would arrive as
+     * an empty string, which [CommandResult.from] reads as success.
+     */
+    private fun runForResult(command: String): CommandResult =
+        CommandResult.from(shell.exec("$command 2>&1"))
 
     // ---- parsing helpers ---------------------------------------------------
 

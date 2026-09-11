@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<lint>
+    <!--
+      ForegroundServicePermission flags `foregroundServiceType="connectedDevice"`
+      unless the app holds one of BLUETOOTH_*, CHANGE_NETWORK_STATE,
+      CHANGE_WIFI_STATE, CHANGE_WIFI_MULTICAST_STATE, NFC, TRANSMIT_IR or
+      UWB_RANGING. Lint's table lists only those permissions, but the platform's
+      runtime policy for this type also accepts "the app has an attached USB
+      device or accessory" — which is precisely and exclusively how CodePanda
+      uses it: SessionService is started only once a device is attached and USB
+      permission has been granted.
+
+      Suppressed narrowly rather than silenced by declaring an unrelated
+      Bluetooth permission we neither need nor want. If a physical Android 14+
+      device ever throws SecurityException from startForeground, the honest
+      reclassification is `specialUse` with a justification property.
+    -->
+    <issue id="ForegroundServicePermission" severity="ignore">
+        <ignore path="src/main/AndroidManifest.xml" />
+    </issue>
+</lint>
