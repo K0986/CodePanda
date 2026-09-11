@@ -87,14 +87,20 @@ class MirrorViewModel : ViewModel() {
                     surface = surface,
                     widthHint = w,
                     heightHint = h,
-                    onError = { t -> status = "Stream error: ${t.message}" },
-                    onStopped = { onStreamStopped() },
+                    // Both callbacks fire on the decoder thread; Compose state
+                    // must only be touched from the main thread.
+                    onError = { t -> postToMain { status = "Stream error: ${t.message}" } },
+                    onStopped = { postToMain { onStreamStopped() } },
                 ).also { it.start() }
             } catch (t: Throwable) {
                 status = t.message ?: "Could not start mirroring"
                 mirroring = false
             }
         }
+    }
+
+    private fun postToMain(block: () -> Unit) {
+        viewModelScope.launch(Dispatchers.Main) { block() }
     }
 
     /**
@@ -112,12 +118,17 @@ class MirrorViewModel : ViewModel() {
 
     fun stopMirror() {
         mirroring = false
-        decoder?.stop()
+        val current = decoder ?: return
         decoder = null
+        // stop() joins the decoder thread, so never run it on the main thread.
+        viewModelScope.launch(Dispatchers.IO) { current.stop() }
     }
 
     override fun onCleared() {
-        stopMirror()
+        mirroring = false
+        // viewModelScope is already cancelled by now, so tear down inline.
+        decoder?.stop()
+        decoder = null
         surface = null
     }
 }

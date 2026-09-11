@@ -115,22 +115,32 @@ class PackageRepository(
      * Stream-install an APK read from [input] of known [size]. This mirrors
      * `adb install`: the bytes are piped straight into `cmd package install`'s
      * stdin, so nothing is staged on the device's storage first.
+     *
+     * [size] must be the exact byte count — `cmd package install -S` reads
+     * precisely that many bytes and would otherwise hang waiting for more.
      */
     suspend fun installStreaming(
         input: InputStream,
         size: Long,
         onProgress: (Long) -> Unit = {},
     ): CommandResult = withContext(Dispatchers.IO) {
+        require(size > 0) { "APK size must be known to stream-install (got $size)" }
         val stream = connection.open("exec:cmd package install -r -S $size")
         try {
             val buffer = ByteArray(64 * 1024)
             var sent = 0L
-            while (true) {
+            while (sent < size) {
                 val read = input.read(buffer)
                 if (read <= 0) break
                 stream.write(if (read == buffer.size) buffer else buffer.copyOf(read))
                 sent += read
                 onProgress(sent)
+            }
+            if (sent != size) {
+                return@withContext CommandResult(
+                    false,
+                    "Aborted: expected $size bytes but the source provided $sent",
+                )
             }
             CommandResult.from(stream.readAllText())
         } finally {

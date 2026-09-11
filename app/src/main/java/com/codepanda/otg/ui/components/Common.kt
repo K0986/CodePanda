@@ -29,7 +29,6 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import com.codepanda.otg.ui.theme.PandaCyan
 import com.codepanda.otg.ui.theme.PandaTextMuted
-import kotlin.math.abs
 
 /** A titled, elevated container used throughout the feature screens. */
 @Composable
@@ -138,7 +137,9 @@ fun MonogramAvatar(seed: String, letter: String, size: Int = 40) {
         Color(0xFF22B8FF), Color(0xFF34D399), Color(0xFFFBBF24),
         Color(0xFFF472B6), Color(0xFFA78BFA), Color(0xFF60A5FA),
     )
-    val color = palette[abs(seed.hashCode()) % palette.size]
+    // Kotlin's mod() is always non-negative; abs() is not (abs(Int.MIN_VALUE)
+    // is still negative, which would index out of bounds).
+    val color = palette[seed.hashCode().mod(palette.size)]
     Surface(shape = CircleShape, color = color, modifier = Modifier.size(size.dp)) {
         Box(contentAlignment = Alignment.Center) {
             Text(

@@ -20,14 +20,13 @@ import kotlinx.coroutines.withContext
 class BloatwareRepository(private val shell: AdbShell) {
 
     suspend fun list(): List<BloatApp> = withContext(Dispatchers.IO) {
-        val system = names(shell.exec("pm list packages -s"))
+        val installed = names(shell.exec("pm list packages -s"))
         val disabled = names(shell.exec("pm list packages -d"))
         // `-u` includes packages uninstalled for the user but still on the image.
         val allIncludingUninstalled = names(shell.exec("pm list packages -s -u"))
-        val installed = names(shell.exec("pm list packages -s"))
         val removedForUser = allIncludingUninstalled - installed
 
-        (system + removedForUser).distinct().sorted().map { pkg ->
+        (installed + removedForUser).distinct().sorted().map { pkg ->
             val known = CATALOG[pkg] ?: CATALOG.entries.firstOrNull { pkg.startsWith(it.key) }?.value
             BloatApp(
                 packageName = pkg,
@@ -92,6 +91,12 @@ class BloatwareRepository(private val shell: AdbShell) {
             "com.android.systemui" to Known("System UI", "Status bar & navigation — do NOT remove.", BloatSafety.UNSAFE),
             "com.google.android.gms" to Known("Google Play Services", "Core dependency for most apps — do NOT remove.", BloatSafety.UNSAFE),
             "com.android.vending" to Known("Google Play Store", "App store — removing breaks updates.", BloatSafety.UNSAFE),
+            "com.android.settings" to Known("Settings", "The system Settings app — do NOT remove.", BloatSafety.UNSAFE),
+            "com.android.providers." to Known("System content provider", "Backs settings, media, contacts and telephony storage — removing bricks the device.", BloatSafety.UNSAFE),
+            "com.android.server.telecom" to Known("Telecom", "Call routing — removing breaks calling.", BloatSafety.UNSAFE),
+            "com.android.permissioncontroller" to Known("Permission Controller", "Grants and revokes app permissions — do NOT remove.", BloatSafety.UNSAFE),
+            "com.android.externalstorage" to Known("External Storage", "Provides access to shared storage — do NOT remove.", BloatSafety.UNSAFE),
+            "com.google.android.inputmethod.latin" to Known("Gboard", "Default keyboard. Only remove if another keyboard is installed and selected.", BloatSafety.EXPERT),
         )
     }
 }

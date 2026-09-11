@@ -138,7 +138,7 @@ private fun FilterRow(viewModel: PackagesViewModel) {
         PackageFilter.entries.forEach { f ->
             FilterChip(
                 selected = viewModel.filter == f,
-                onClick = { viewModel.setFilter(f) },
+                onClick = { viewModel.updateFilter(f) },
                 label = { Text(f.label) },
             )
         }
@@ -149,7 +149,7 @@ private fun FilterRow(viewModel: PackagesViewModel) {
 private fun SearchField(viewModel: PackagesViewModel) {
     OutlinedTextField(
         value = viewModel.query,
-        onValueChange = viewModel::setQuery,
+        onValueChange = viewModel::updateQuery,
         leadingIcon = { Icon(Icons.Filled.Search, null) },
         placeholder = { Text("Filter by package name") },
         singleLine = true,

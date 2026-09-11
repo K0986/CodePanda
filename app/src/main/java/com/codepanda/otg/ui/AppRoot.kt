@@ -1,8 +1,8 @@
 package com.codepanda.otg.ui
 
-import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.Surface
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.codepanda.otg.core.session.ConnectionState
