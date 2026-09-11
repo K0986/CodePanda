@@ -1,0 +1,16 @@
+*.iml
+.gradle
+/local.properties
+/.idea
+.DS_Store
+/build
+/captures
+.externalNativeBuild
+.cxx
+local.properties
+*.apk
+*.aab
+/app/release
+/app/debug
+# Bundled third-party binaries fetched at setup time
+/app/src/main/assets/scrcpy-server

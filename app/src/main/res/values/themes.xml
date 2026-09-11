@@ -1,0 +1,10 @@
+<resources xmlns:tools="http://schemas.android.com/tools">
+    <!-- Base application theme. Compose drives the real theming; this is the
+         window-level theme used before Compose takes over. -->
+    <style name="Theme.CodePanda" parent="android:Theme.Material.NoActionBar">
+        <item name="android:statusBarColor">@color/panda_navy</item>
+        <item name="android:navigationBarColor">@color/panda_navy</item>
+        <item name="android:windowBackground">@color/panda_navy</item>
+        <item name="android:windowLightStatusBar">false</item>
+    </style>
+</resources>
