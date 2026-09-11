@@ -12,10 +12,17 @@ data class AdbMessage(
     val arg1: Int,
     val payload: ByteArray = EMPTY,
 ) {
-    /** Serialise header + payload into a single contiguous buffer for transport. */
-    fun toBytes(): ByteArray {
+    /**
+     * Serialise just the 24-byte header.
+     *
+     * The header and the payload are deliberately *separate* buffers: `adbd`
+     * reads a packet as two transfers (a fixed 24-byte read, then a read of
+     * exactly `data_length` bytes), so the transport must not merge them into
+     * one USB transfer. See [com.codepanda.otg.adb.AdbConnection.sendMessage].
+     */
+    fun headerBytes(): ByteArray {
         val buffer = ByteBuffer
-            .allocate(AdbProtocol.HEADER_LENGTH + payload.size)
+            .allocate(AdbProtocol.HEADER_LENGTH)
             .order(ByteOrder.LITTLE_ENDIAN)
         buffer.putInt(command)
         buffer.putInt(arg0)
@@ -23,7 +30,6 @@ data class AdbMessage(
         buffer.putInt(payload.size)
         buffer.putInt(AdbProtocol.payloadChecksum(payload))
         buffer.putInt(command xor -0x1) // magic = command ^ 0xffffffff
-        buffer.put(payload)
         return buffer.array()
     }
 

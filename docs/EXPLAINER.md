@@ -111,10 +111,9 @@ private fun dispatch(message: AdbMessage) {
             if (!stream.isOpened) stream.onOpened(message.arg0) else stream.onReady()
         }
         A_WRTE -> {
-            streams[message.arg1]?.let {
-                it.onPayload(message.payload)
-                sendMessage(AdbMessage.okay(message.arg1, message.arg0)) // flow-control ack
-            }
+            // No ack here: the stream sends OKAY once a consumer has taken the
+            // payload, so the ack doubles as backpressure.
+            streams[message.arg1]?.onPayload(message.payload)
         }
         A_CLSE -> streams.remove(message.arg1)?.onRemoteClose()
     }
@@ -195,11 +194,11 @@ navigation between "connected" and "disconnected".
 
 ## 4. Verification
 
-> ⚠️ **What was tested and what wasn't.** The build machine had the JDK and Gradle but **no
-> Android SDK and no physical device**, so the app was not run end-to-end here. The
-> protocol-critical, device-independent Kotlin (the `adb` package) was **type-checked in
-> isolation** with the Kotlin compiler and small Android stubs, and passed the frontend with
-> zero errors.
+> ⚠️ **What was tested and what wasn't.** The debug and release variants build against
+> Android SDK 34, and `./gradlew :app:testDebugUnitTest` exercises the protocol layer on the
+> JVM: packet framing, payload-size negotiation, flow control, stream teardown and the
+> `AUTH` signature padding all have coverage. Nothing here replaces a run against a real
+> phone — USB timing, `screenrecord` quirks and OEM `pm` output still need a device.
 
 **How to QA manually:**
 
@@ -276,7 +275,9 @@ splice packets together.
 
 **Answer: reply with <code>OKAY</code>.** ADB uses strict one-in-flight flow control per
 stream. Until the sender receives an `OKAY` acking the previous `WRTE`, it will not send the
-next one. Forgetting the ack deadlocks that stream (but not others).
+next one. Forgetting the ack deadlocks that stream (but not others). CodePanda sends it from
+the *consumer* rather than the reader thread, so a producer the app cannot keep up with —
+`screenrecord`, say — is throttled instead of being buffered onto the heap.
 </details>
 
 <details>

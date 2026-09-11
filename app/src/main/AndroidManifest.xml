@@ -42,10 +42,17 @@
                 android:resource="@xml/device_filter" />
         </activity>
 
+        <!--
+          The `connectedDevice` type's runtime prerequisite is satisfied by the
+          USB device grant we obtain through UsbManager.requestPermission()
+          before the service is ever started; lint only models the Bluetooth /
+          NFC / network routes to that same permission gate.
+        -->
         <service
             android:name=".core.session.SessionService"
             android:exported="false"
-            android:foregroundServiceType="connectedDevice" />
+            android:foregroundServiceType="connectedDevice"
+            tools:ignore="ForegroundServicePermission" />
 
     </application>
 

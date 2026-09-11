@@ -54,6 +54,14 @@ android {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
         }
     }
+
+    testOptions {
+        unitTests {
+            // The ADB stack only touches android.util.Log, so stubbing the
+            // framework out is enough to exercise it on a plain JVM.
+            isReturnDefaultValues = true
+        }
+    }
 }
 
 dependencies {

@@ -85,9 +85,16 @@ class AdbConnection(
     }
 
     internal fun sendMessage(message: AdbMessage) {
-        val bytes = message.toBytes()
+        val header = message.headerBytes()
+        val payload = message.payload
         synchronized(writeLock) {
-            transport.write(bytes)
+            // Two transfers, never one: adbd reads the 24-byte header with a
+            // fixed-size read and the payload with a second read of exactly
+            // data_length bytes. Sending both in a single USB transfer makes the
+            // first bulk packet overflow adbd's header read on devices whose
+            // adbd does not reassemble the endpoint into a byte stream.
+            transport.write(header)
+            if (payload.isNotEmpty()) transport.write(payload)
         }
     }
 
@@ -177,7 +184,15 @@ class AdbConnection(
     }
 
     private fun handleConnect(message: AdbMessage) {
-        maxPayload = if (message.arg1 in 1..(1024 * 1024)) message.arg1 else maxPayload
+        // Mirrors adb's own negotiation: honour what the device asks for, but
+        // never exceed what we advertised, and treat pre-A_VERSION_MIN devices
+        // as small-packet only. The lower bound guards against a device that
+        // reports a nonsensical zero.
+        maxPayload = if (message.arg0 < AdbProtocol.A_VERSION_MIN) {
+            AdbProtocol.MAX_PAYLOAD_V1
+        } else {
+            message.arg1.coerceIn(AdbProtocol.MAX_PAYLOAD_V1, AdbProtocol.MAX_PAYLOAD)
+        }
         deviceBanner = String(message.payload, Charsets.UTF_8).trimEnd('\u0000')
         connected = true
         connectedLatch.countDown()

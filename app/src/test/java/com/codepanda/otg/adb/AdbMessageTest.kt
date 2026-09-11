@@ -7,20 +7,20 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 
 /**
- * Wire-format tests for the ADB packet header. These are the bytes adbd parses,
- * so an accidental change here breaks every connection.
+ * Wire-format tests for the ADB packet header. These are the exact bytes adbd
+ * parses, so an accidental change here breaks every connection.
  */
 class AdbMessageTest {
 
     private fun header(bytes: ByteArray): ByteBuffer =
-        ByteBuffer.wrap(bytes, 0, AdbProtocol.HEADER_LENGTH).order(ByteOrder.LITTLE_ENDIAN)
+        ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN)
 
     @Test
-    fun `header is 24 little-endian bytes followed by the payload`() {
+    fun `header is 24 little-endian bytes and excludes the payload`() {
         val payload = byteArrayOf(1, 2, 3)
-        val bytes = AdbMessage(AdbProtocol.A_WRTE, 7, 9, payload).toBytes()
+        val bytes = AdbMessage(AdbProtocol.A_WRTE, 7, 9, payload).headerBytes()
 
-        assertEquals(AdbProtocol.HEADER_LENGTH + payload.size, bytes.size)
+        assertEquals(AdbProtocol.HEADER_LENGTH, bytes.size)
         val h = header(bytes)
         assertEquals(AdbProtocol.A_WRTE, h.int)
         assertEquals(7, h.int)
@@ -28,7 +28,6 @@ class AdbMessageTest {
         assertEquals(payload.size, h.int)
         assertEquals(6, h.int) // checksum = 1 + 2 + 3
         assertEquals(AdbProtocol.A_WRTE xor -0x1, h.int)
-        assertArrayEquals(payload, bytes.copyOfRange(AdbProtocol.HEADER_LENGTH, bytes.size))
     }
 
     @Test
@@ -37,7 +36,7 @@ class AdbMessageTest {
             AdbProtocol.A_CNXN, AdbProtocol.A_AUTH, AdbProtocol.A_OPEN,
             AdbProtocol.A_OKAY, AdbProtocol.A_CLSE, AdbProtocol.A_WRTE,
         ).forEach { command ->
-            val h = header(AdbMessage(command, 0, 0).toBytes())
+            val h = header(AdbMessage(command, 0, 0).headerBytes())
             repeat(5) { h.int }
             assertEquals("magic for ${AdbProtocol.commandName(command)}", command xor -0x1, h.int)
         }
@@ -51,10 +50,9 @@ class AdbMessageTest {
     }
 
     @Test
-    fun `service names and connect banner are null-terminated`() {
+    fun `service names and the connect banner are null-terminated`() {
         val open = AdbMessage.open(localId = 3, service = "shell:ls")
-        val openPayload = String(open.payload, Charsets.UTF_8)
-        assertEquals("shell:ls\u0000", openPayload)
+        assertEquals("shell:ls\u0000", String(open.payload, Charsets.UTF_8))
         assertEquals(3, open.arg0)
 
         val connect = AdbMessage.connect()
