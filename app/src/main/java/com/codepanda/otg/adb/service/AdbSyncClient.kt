@@ -154,12 +154,16 @@ class AdbSyncClient(connection: AdbConnection) : AutoCloseable {
     }
 
     private fun sendDataChunk(data: ByteArray, length: Int) {
-        stream.write(tagWithLength(ID_DATA, length))
-        stream.write(if (length == data.size) data else data.copyOfRange(0, length))
+        // Header and payload go out as one write: every write costs a
+        // flow-control round trip, so splitting them halved push throughput.
+        val packet = ByteArray(SYNC_HEADER_LENGTH + length)
+        tagWithLength(ID_DATA, length).copyInto(packet)
+        data.copyInto(packet, SYNC_HEADER_LENGTH, 0, length)
+        stream.write(packet)
     }
 
     private fun tagWithLength(tag: String, length: Int): ByteArray {
-        val buffer = ByteBuffer.allocate(8).order(ByteOrder.LITTLE_ENDIAN)
+        val buffer = ByteBuffer.allocate(SYNC_HEADER_LENGTH).order(ByteOrder.LITTLE_ENDIAN)
         buffer.put(tag.toByteArray(Charsets.US_ASCII))
         buffer.putInt(length)
         return buffer.array()
@@ -188,6 +192,7 @@ class AdbSyncClient(connection: AdbConnection) : AutoCloseable {
         private const val ID_QUIT = "QUIT"
 
         private const val SYNC_DATA_MAX = 64 * 1024
+        private const val SYNC_HEADER_LENGTH = 8
         private const val DONE_TRAILER = 16
     }
 }

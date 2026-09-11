@@ -54,12 +54,21 @@ object AdbProtocol {
     const val A_VERSION = 0x01000001
 
     /**
+     * Oldest protocol version that understands large payloads. A device that
+     * reports anything below this is limited to [MAX_PAYLOAD_V1] per packet.
+     */
+    const val A_VERSION_MIN = 0x01000000
+
+    /**
      * Maximum payload we advertise, matching what `adb` itself advertises for
      * protocol version [A_VERSION]. adbd negotiates down if it is older, and the
      * value it reports back in its `CNXN` is what we actually honour when
      * splitting writes.
      */
     const val MAX_PAYLOAD = 1024 * 1024
+
+    /** Payload ceiling for pre-[A_VERSION_MIN] devices. */
+    const val MAX_PAYLOAD_V1 = 4 * 1024
 
     /** Connect payload advertising the host and the features we understand. */
     const val CONNECT_PAYLOAD =

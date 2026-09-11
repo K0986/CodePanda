@@ -9,6 +9,7 @@ import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
+import android.util.Log
 import com.codepanda.otg.MainActivity
 import com.codepanda.otg.R
 
@@ -27,16 +28,27 @@ class SessionService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         createChannel()
         val notification = buildNotification()
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            startForeground(
-                NOTIFICATION_ID,
-                notification,
-                ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE,
-            )
-        } else {
-            startForeground(NOTIFICATION_ID, notification)
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                startForeground(
+                    NOTIFICATION_ID,
+                    notification,
+                    ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE,
+                )
+            } else {
+                startForeground(NOTIFICATION_ID, notification)
+            }
+        } catch (t: Throwable) {
+            // On API 34+ the `connectedDevice` type is only allowed while we
+            // hold a USB device grant. Losing the priority boost is survivable;
+            // taking the app down in the middle of a transfer is not.
+            Log.w(TAG, "could not enter the foreground: ${t.message}")
+            stopSelf()
         }
-        return START_STICKY
+        // Deliberately not sticky: without a live USB session there is nothing
+        // to resume, and a restart with no device grant could not legally enter
+        // the foreground anyway.
+        return START_NOT_STICKY
     }
 
     private fun createChannel() {
@@ -74,6 +86,7 @@ class SessionService : Service() {
     }
 
     companion object {
+        private const val TAG = "SessionService"
         private const val CHANNEL_ID = "codepanda_session"
         private const val NOTIFICATION_ID = 42
 

@@ -60,6 +60,14 @@ Requirements: **Android Studio Koala+**, **Android SDK 34**, JDK 17.
 ./gradlew :app:assembleDebug
 ```
 
+Run the JVM test suite (packet framing, payload negotiation, flow control, auth signing) with:
+
+```bash
+./gradlew :app:testDebugUnitTest
+```
+
+Both run on every push and pull request via [GitHub Actions](.github/workflows/android.yml).
+
 Install on a phone that has a USB-OTG port, connect the target device, enable USB debugging on
 it, tap **Connect**, then approve the prompt on the target (choose *Always allow*).
 

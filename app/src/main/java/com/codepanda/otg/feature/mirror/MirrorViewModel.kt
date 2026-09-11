@@ -29,6 +29,7 @@ class MirrorViewModel : ViewModel() {
     private var lastScreenshotBytes: ByteArray? = null
     private var decoder: VideoDecoder? = null
     private var surface: Surface? = null
+    private var sessionStartedAt = 0L
 
     private val repo get() = SessionManager.session?.capture
 
@@ -82,6 +83,7 @@ class MirrorViewModel : ViewModel() {
                 val stream = withContext(Dispatchers.IO) {
                     repo.openVideoStream(width = w, height = h)
                 }
+                sessionStartedAt = System.currentTimeMillis()
                 decoder = VideoDecoder(
                     stream = stream,
                     surface = surface,
@@ -106,13 +108,23 @@ class MirrorViewModel : ViewModel() {
     /**
      * `screenrecord` stops itself at the time limit. If the user still wants to
      * mirror, transparently start a fresh session on the same surface.
+     *
+     * A session that dies almost immediately means something is wrong with the
+     * stream itself (an unsupported `screenrecord` flag, a revoked
+     * authorisation) rather than the time limit expiring, so we stop instead of
+     * spinning up a new `screenrecord` process forever.
      */
     private fun onStreamStopped() {
+        decoder = null
         val surface = surface
-        if (mirroring && surface != null && surface.isValid) {
-            startInternal(surface)
-        } else {
-            mirroring = false
+        val lasted = System.currentTimeMillis() - sessionStartedAt
+        when {
+            !mirroring || surface == null || !surface.isValid -> mirroring = false
+            lasted < MIN_SESSION_MS -> {
+                mirroring = false
+                status = "Mirroring stopped: the screen stream ended immediately."
+            }
+            else -> startInternal(surface)
         }
     }
 
@@ -125,10 +137,16 @@ class MirrorViewModel : ViewModel() {
     }
 
     override fun onCleared() {
+        super.onCleared()
         mirroring = false
         // viewModelScope is already cancelled by now, so tear down inline.
         decoder?.stop()
         decoder = null
         surface = null
+    }
+
+    private companion object {
+        /** Shorter than this and a restart is a failure loop, not a renewal. */
+        const val MIN_SESSION_MS = 3_000L
     }
 }
