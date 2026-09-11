@@ -1,0 +1,26 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- Stylised chip representing the connected device -->
+    <path
+        android:fillColor="#22B8FF"
+        android:pathData="M38,38 h32 a4,4 0 0 1 4,4 v24 a4,4 0 0 1 -4,4 h-32 a4,4 0 0 1 -4,-4 v-24 a4,4 0 0 1 4,-4 z" />
+    <path
+        android:fillColor="#0A1B3D"
+        android:pathData="M44,46 h20 v16 h-20 z" />
+    <!-- Pins -->
+    <path android:fillColor="#22B8FF" android:pathData="M42,30 h3 v8 h-3 z" />
+    <path android:fillColor="#22B8FF" android:pathData="M52,30 h3 v8 h-3 z" />
+    <path android:fillColor="#22B8FF" android:pathData="M62,30 h3 v8 h-3 z" />
+    <path android:fillColor="#22B8FF" android:pathData="M42,70 h3 v8 h-3 z" />
+    <path android:fillColor="#22B8FF" android:pathData="M52,70 h3 v8 h-3 z" />
+    <path android:fillColor="#22B8FF" android:pathData="M62,70 h3 v8 h-3 z" />
+    <path android:fillColor="#22B8FF" android:pathData="M30,42 h8 v3 h-8 z" />
+    <path android:fillColor="#22B8FF" android:pathData="M30,52 h8 v3 h-8 z" />
+    <path android:fillColor="#22B8FF" android:pathData="M30,62 h8 v3 h-8 z" />
+    <path android:fillColor="#22B8FF" android:pathData="M70,42 h8 v3 h-8 z" />
+    <path android:fillColor="#22B8FF" android:pathData="M70,52 h8 v3 h-8 z" />
+    <path android:fillColor="#22B8FF" android:pathData="M70,62 h8 v3 h-8 z" />
+</vector>

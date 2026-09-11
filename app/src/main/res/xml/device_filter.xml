@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  USB device filter. We match on the ADB interface class/subclass/protocol
+  (0xFF / 0x42 / 0x01) which every Android device in "USB debugging" mode
+  exposes, rather than hard-coding vendor IDs. This makes the app work with
+  phones from any manufacturer.
+-->
+<resources>
+    <usb-device class="255" subclass="66" protocol="1" />
+</resources>
