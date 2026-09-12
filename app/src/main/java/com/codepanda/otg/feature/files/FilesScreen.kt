@@ -21,6 +21,8 @@ import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.DriveFileRenameOutline
 import androidx.compose.material.icons.filled.Folder
+import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Upload
@@ -85,62 +87,54 @@ fun FilesScreen(viewModel: FilesViewModel = viewModel()) {
     LaunchedEffect(viewModel.message) {
         viewModel.message?.let {
             snackbar.showSnackbar(it)
-            viewModel.consumeMessage()
         }
     }
 
     Scaffold(
         snackbarHost = { SnackbarHost(snackbar) },
-        floatingActionButton = {
-            FloatingActionButton(
-                onClick = { pushPicker.launch("*/*") },
-                containerColor = PandaCyan,
-            ) { Icon(Icons.Filled.Upload, contentDescription = "Push file") }
-        },
-        containerColor = MaterialTheme.colorScheme.background,
-    ) { padding ->
-        Column(Modifier.fillMaxSize().padding(padding)) {
-            PathBar(
-                path = currentPath,
-                onUp = viewModel::goUp,
-                onNewFolder = { showNewFolder = true },
-                onRefresh = viewModel::refresh,
+        topBar = {
+            androidx.compose.material3.TopAppBar(
+                title = { Text("Files: $currentPath", maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                actions = {
+                    IconButton(onClick = { viewModel.refresh() }) {
+                        Icon(Icons.Default.Refresh, contentDescription = "Refresh")
+                    }
+                    IconButton(onClick = { pushPicker.launch("*/*") }) {
+                        Icon(Icons.Default.Upload, contentDescription = "Upload")
+                    }
+                    IconButton(onClick = { showNewFolder = true }) {
+                        Icon(Icons.Default.CreateNewFolder, contentDescription = "New Folder")
+                    }
+                },
             )
-
-            // Transfers live in the session, so they keep running (and keep
-            // reporting progress) even if the user leaves this screen.
-            transfers.forEach { transfer ->
-                TransferRow(
-                    transfer = transfer,
-                    onCancel = viewModel::cancelTransfer,
-                    onDismiss = viewModel::dismissTransfer,
-                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp),
-                )
-            }
-
-            when (val state = listing) {
-                is Async.Idle, is Async.Loading -> LoadingBox("Listing $currentPath…")
-                is Async.Failure -> MessageBox(
-                    title = "Couldn't open folder",
-                    subtitle = state.message,
-                    action = {
-                        Button(onClick = viewModel::refresh) { Text("Retry") }
-                    },
-                )
+        },
+    ) { padding ->
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(padding),
+        ) {
+            when (listing) {
+                Async.Idle -> {}
+                Async.Loading -> LoadingBox()
+                is Async.Failure -> {
+                    MessageBox(
+                        title = "Error",
+                        message = (listing as Async.Failure).message,
+                        onDismiss = { viewModel.refresh() },
+                    )
+                }
                 is Async.Success -> {
-                    if (state.data.isEmpty()) {
-                        MessageBox("Empty folder", "Nothing to show here.")
-                    } else {
-                        LazyColumn(Modifier.fillMaxSize()) {
-                            items(state.data, key = { it.absolutePath }) { item ->
-                                FileRow(
-                                    item = item,
-                                    onOpen = { viewModel.navigateInto(item) },
-                                    onPull = { viewModel.download(context, item) },
-                                    onDelete = { deleteTarget = item },
-                                    onRename = { renameTarget = item },
-                                )
-                            }
+                    val items = (listing as Async.Success<List<FileItem>>).value
+                    LazyColumn(modifier = Modifier.fillMaxSize()) {
+                        items(items) { item ->
+                            FileItemRow(
+                                item = item,
+                                onOpen = { viewModel.navigateInto(item) },
+                                onDownload = { viewModel.download(context, item) },
+                                onRename = { renameTarget = item },
+                                onDelete = { deleteTarget = item },
+                            )
                         }
                     }
                 }
@@ -149,169 +143,268 @@ fun FilesScreen(viewModel: FilesViewModel = viewModel()) {
     }
 
     if (showNewFolder) {
-        TextPromptDialog(
-            title = "New folder",
-            label = "Folder name",
-            onConfirm = { name -> showNewFolder = false; viewModel.makeDirectory(name) },
+        CreateFolderDialog(
+            onConfirm = { name ->
+                viewModel.makeDirectory(name)
+                showNewFolder = false
+            },
             onDismiss = { showNewFolder = false },
         )
     }
-    renameTarget?.let { target ->
-        TextPromptDialog(
-            title = "Rename",
-            label = "New name",
-            initial = target.name,
-            onConfirm = { name -> renameTarget = null; viewModel.rename(target, name) },
+
+    if (renameTarget != null) {
+        RenameFolderDialog(
+            item = renameTarget!!,
+            onConfirm = { newName ->
+                viewModel.rename(renameTarget!!, newName)
+                renameTarget = null
+            },
             onDismiss = { renameTarget = null },
         )
     }
-    deleteTarget?.let { target ->
-        ConfirmDialog(
-            title = "Delete ${target.name}?",
-            message = if (target.isDirectory) "This will remove the folder and all its contents."
-            else "This file will be permanently deleted from the device.",
-            confirmLabel = "Delete",
-            onConfirm = { deleteTarget = null; viewModel.delete(target) },
+
+    if (deleteTarget != null) {
+        DeleteDialog(
+            item = deleteTarget!!,
+            onConfirm = {
+                viewModel.delete(deleteTarget!!)
+                deleteTarget = null
+            },
             onDismiss = { deleteTarget = null },
         )
     }
 }
 
 @Composable
-private fun PathBar(
-    path: String,
-    onUp: () -> Unit,
-    onNewFolder: () -> Unit,
-    onRefresh: () -> Unit,
-) {
-    Row(
-        Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 6.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        IconButton(onClick = onUp) {
-            Icon(Icons.Filled.ArrowUpward, "Up", tint = PandaCyan)
-        }
-        Text(
-            path,
-            Modifier.weight(1f),
-            style = MaterialTheme.typography.bodyMedium.copy(fontFamily = FontFamily.Monospace),
-            color = MaterialTheme.colorScheme.onSurface,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-        )
-        IconButton(onClick = onRefresh) {
-            Icon(Icons.Filled.Refresh, "Refresh", tint = PandaCyan)
-        }
-        IconButton(onClick = onNewFolder) {
-            Icon(Icons.Filled.CreateNewFolder, "New folder", tint = PandaCyan)
-        }
-    }
-}
-
-@Composable
-private fun FileRow(
+private fun FileItemRow(
     item: FileItem,
     onOpen: () -> Unit,
-    onPull: () -> Unit,
-    onDelete: () -> Unit,
+    onDownload: () -> Unit,
     onRename: () -> Unit,
+    onDelete: () -> Unit,
 ) {
-    var menuOpen by remember { mutableStateOf(false) }
-    Row(
-        Modifier.fillMaxWidth().clickable(onClick = onOpen).padding(horizontal = 14.dp, vertical = 8.dp),
-        verticalAlignment = Alignment.CenterVertically,
+    var menuExpanded by remember { mutableStateOf(false) }
+
+    val icon = when {
+        item.accessError != null -> Icons.Default.Lock  // ✨ NEW: Lock icon for inaccessible items
+        item.isDirectory -> Icons.Default.Folder
+        else -> Icons.Default.Description
+    }
+
+    val iconTint = when {
+        item.accessError != null -> MaterialTheme.colorScheme.error  // ✨ NEW: Red for errors
+        item.isDirectory -> MaterialTheme.colorScheme.primary
+        else -> MaterialTheme.colorScheme.onSurfaceVariant
+    }
+
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(
+                enabled = item.isAccessible && (item.isDirectory || item.isSymlink),
+                onClick = onOpen,
+            )
+            .padding(16.dp),
     ) {
-        Icon(
-            if (item.isDirectory) Icons.Filled.Folder else Icons.Filled.Description,
-            contentDescription = null,
-            tint = if (item.isDirectory) PandaCyan else PandaTextMuted,
-            modifier = Modifier.size(34.dp),
-        )
-        Column(Modifier.weight(1f).padding(horizontal = 12.dp)) {
-            Text(
-                item.name,
-                style = MaterialTheme.typography.titleMedium,
-                color = MaterialTheme.colorScheme.onSurface,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Icon(
+                icon,
+                contentDescription = null,
+                tint = iconTint,
+                modifier = Modifier.size(24.dp),
             )
-            Text(
-                buildString {
-                    append(item.permissions)
-                    if (!item.isDirectory) append("   ${formatSize(item.sizeBytes)}")
-                    append("   ${formatDate(item.mtimeSeconds)}")
-                },
-                style = MaterialTheme.typography.labelSmall,
-                color = PandaTextMuted,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
-        }
-        if (!item.isDirectory) {
-            IconButton(onClick = onPull) {
-                Icon(Icons.Filled.Download, "Pull", tint = PandaCyan)
-            }
-        }
-        Box {
-            IconButton(onClick = { menuOpen = true }) {
-                Icon(Icons.Filled.MoreVert, "More", tint = MaterialTheme.colorScheme.onSurface)
-            }
-            DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
-                DropdownMenuItem(
-                    text = { Text("Rename") },
-                    leadingIcon = { Icon(Icons.Filled.DriveFileRenameOutline, null) },
-                    onClick = { menuOpen = false; onRename() },
+
+            Column(
+                modifier = Modifier
+                    .weight(1f)
+                    .padding(start = 16.dp),
+            ) {
+                Text(
+                    item.name,
+                    style = MaterialTheme.typography.bodyMedium,
+                    overflow = TextOverflow.Ellipsis,
                 )
-                DropdownMenuItem(
-                    text = { Text("Delete") },
-                    leadingIcon = { Icon(Icons.Filled.Delete, null, tint = PandaRed) },
-                    onClick = { menuOpen = false; onDelete() },
-                )
+
+                // ✨ NEW: Show error message for inaccessible items
+                if (item.accessError != null) {
+                    Text(
+                        item.accessError!!,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                }
+                // ✨ NEW: Show symlink target if present
+                else if (item.isSymlink && item.symlinkTarget != null) {
+                    Text(
+                        "→ ${item.symlinkTarget}",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = PandaTextMuted,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+                // Show file size for regular files
+                else if (!item.isDirectory) {
+                    Text(
+                        formatFileSize(item.sizeBytes),
+                        style = MaterialTheme.typography.labelSmall,
+                        color = PandaTextMuted,
+                    )
+                }
+            }
+
+            if (item.isAccessible) {
+                Box {
+                    IconButton(onClick = { menuExpanded = true }) {
+                        Icon(Icons.Default.MoreVert, contentDescription = "Actions")
+                    }
+                    DropdownMenu(
+                        expanded = menuExpanded,
+                        onDismissRequest = { menuExpanded = false },
+                    ) {
+                        DropdownMenuItem(
+                            text = { Text("Properties") },
+                            leadingIcon = { Icon(Icons.Default.Info, contentDescription = null) },
+                            onClick = {
+                                menuExpanded = false
+                                // Show properties dialog
+                            },
+                        )
+                        if (!item.isDirectory) {
+                            DropdownMenuItem(
+                                text = { Text("Download") },
+                                leadingIcon = { Icon(Icons.Default.Download, contentDescription = null) },
+                                onClick = {
+                                    menuExpanded = false
+                                    onDownload()
+                                },
+                            )
+                        }
+                        DropdownMenuItem(
+                            text = { Text("Rename") },
+                            leadingIcon = { Icon(Icons.Default.DriveFileRenameOutline, contentDescription = null) },
+                            onClick = {
+                                menuExpanded = false
+                                onRename()
+                            },
+                        )
+                        DropdownMenuItem(
+                            text = { Text("Delete", color = MaterialTheme.colorScheme.error) },
+                            leadingIcon = { Icon(Icons.Default.Delete, contentDescription = null, tint = MaterialTheme.colorScheme.error) },
+                            onClick = {
+                                menuExpanded = false
+                                onDelete()
+                            },
+                        )
+                    }
+                }
             }
         }
     }
 }
 
 @Composable
-private fun TextPromptDialog(
-    title: String,
-    label: String,
-    initial: String = "",
+private fun CreateFolderDialog(
     onConfirm: (String) -> Unit,
     onDismiss: () -> Unit,
 ) {
-    var value by remember { mutableStateOf(initial) }
+    var folderName by remember { mutableStateOf("") }
+
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text(title) },
+        title = { Text("Create Folder") },
         text = {
             OutlinedTextField(
-                value = value,
-                onValueChange = { value = it },
-                label = { Text(label) },
+                value = folderName,
+                onValueChange = { folderName = it },
+                label = { Text("Folder Name") },
                 singleLine = true,
             )
         },
         confirmButton = {
-            TextButton(
-                onClick = { if (value.isNotBlank()) onConfirm(value.trim()) },
-            ) { Text("OK") }
+            Button(
+                onClick = { onConfirm(folderName) },
+                enabled = folderName.isNotBlank(),
+            ) {
+                Text("Create")
+            }
         },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Cancel")
+            }
+        },
     )
 }
 
-private fun formatSize(bytes: Long): String {
-    if (bytes < 1024) return "$bytes B"
-    val kb = bytes / 1024.0
-    if (kb < 1024) return "%.1f KB".format(kb)
-    val mb = kb / 1024.0
-    if (mb < 1024) return "%.1f MB".format(mb)
-    return "%.2f GB".format(mb / 1024.0)
+@Composable
+private fun RenameFolderDialog(
+    item: FileItem,
+    onConfirm: (String) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    var newName by remember { mutableStateOf(item.name) }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Rename") },
+        text = {
+            OutlinedTextField(
+                value = newName,
+                onValueChange = { newName = it },
+                label = { Text("New Name") },
+                singleLine = true,
+            )
+        },
+        confirmButton = {
+            Button(
+                onClick = { onConfirm(newName) },
+                enabled = newName.isNotBlank() && newName != item.name,
+            ) {
+                Text("Rename")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Cancel")
+            }
+        },
+    )
 }
 
-private fun formatDate(seconds: Long): String {
-    if (seconds <= 0) return ""
-    val fmt = SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.getDefault())
-    return fmt.format(Date(seconds * 1000))
+@Composable
+private fun DeleteDialog(
+    item: FileItem,
+    onConfirm: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Delete") },
+        text = { Text("Delete ${item.name}?") },
+        confirmButton = {
+            Button(
+                onClick = onConfirm,
+                colors = androidx.compose.material3.ButtonDefaults.buttonColors(
+                    containerColor = MaterialTheme.colorScheme.error,
+                ),
+            ) {
+                Text("Delete")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Cancel")
+            }
+        },
+    )
+}
+
+private fun formatFileSize(bytes: Long): String {
+    if (bytes <= 0) return "0 B"
+    val units = arrayOf("B", "KB", "MB", "GB", "TB")
+    val digitGroups = (Math.log10(bytes.toDouble()) / Math.log10(1024.0)).toInt().coerceIn(0, units.size - 1)
+    return String.format("%.1f %s", bytes / Math.pow(1024.0, digitGroups.toDouble()), units[digitGroups])
 }

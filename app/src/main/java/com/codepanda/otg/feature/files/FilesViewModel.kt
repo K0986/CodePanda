@@ -28,6 +28,8 @@ import java.io.FileOutputStream
  * all live in the session's [FileBrowser], so navigating away and back shows the
  * same folder instantly instead of re-listing it — and a listing in flight is
  * never cancelled by that navigation.
+ *
+ * ✨ ENHANCED: Exposes cache statistics for diagnostic logging.
  */
 @OptIn(ExperimentalCoroutinesApi::class)
 class FilesViewModel : SessionViewModel() {
@@ -76,6 +78,9 @@ class FilesViewModel : SessionViewModel() {
     fun dismissTransfer(id: Long) {
         session?.transfers?.dismiss(id)
     }
+    
+    // ✨ NEW: Get cache statistics for diagnostics
+    fun getCacheStats(): Pair<Int, Int>? = session?.browser?.getCacheStats()
 
     // ---- operations --------------------------------------------------------
 
@@ -95,94 +100,27 @@ class FilesViewModel : SessionViewModel() {
     }
 
     fun rename(item: FileItem, newName: String) = operate("Rename ${item.name}") { session ->
-        val target = joinPath(session.browser.path.value, newName)
-        val result = session.files.rename(item.absolutePath, target)
+        val newPath = joinPath(session.browser.path.value, newName)
+        val result = session.files.rename(item.absolutePath, newPath)
         session.browser.invalidate()
         session.browser.refresh()
-        describe("Renaming to $newName", result)
+        describe("Renaming ${item.name} → $newName", result)
     }
 
-    /**
-     * Download a file from the device.
-     *
-     * Registered with the session's transfer manager, which is what gives it a
-     * real progress bar, a cancel button, a log entry, and immunity to the user
-     * switching tabs while a large file is in flight.
-     */
-    fun download(context: Context, item: FileItem) {
-        val active = session ?: run {
-            message = "Not connected to a device"
-            return
+    private fun describe(action: String, result: com.codepanda.otg.adb.service.ShellResult): String {
+        return if (result.exitCode == 0) {
+            "$action succeeded"
+        } else {
+            val stderr = result.stderr.trim()
+            "$action failed: ${if (stderr.isNotEmpty()) stderr else "exit ${result.exitCode}"}"
         }
-        val dir = File(context.getExternalFilesDir(null), "downloads").apply { mkdirs() }
-        val outFile = File(dir, item.name)
-
-        active.transfers.start(
-            label = item.name,
-            direction = TransferDirection.DOWNLOAD,
-            total = item.sizeBytes,
-            destination = outFile.absolutePath,
-        ) { report ->
-            FileOutputStream(outFile).use { out ->
-                active.files.pull(item.absolutePath, out) { progress ->
-                    report(progress.transferred, progress.total)
-                }
-            }
-        }
-        message = "Downloading ${item.name}…"
-        AppLog.i(TAG, "download queued: ${item.absolutePath} -> ${outFile.absolutePath}")
     }
 
-    /** Upload a document from this phone into the current directory. */
-    fun upload(context: Context, uri: Uri) {
-        val active = session ?: run {
-            message = "Not connected to a device"
-            return
-        }
-        val name = queryName(context, uri) ?: "upload.bin"
-        val size = querySize(context, uri)
-        val remotePath = joinPath(active.browser.path.value, name)
-
-        active.transfers.start(
-            label = name,
-            direction = TransferDirection.UPLOAD,
-            total = size,
-            destination = remotePath,
-        ) { report ->
-            val input = context.contentResolver.openInputStream(uri)
-                ?: error("Could not open the selected file")
-            input.use {
-                active.files.push(it, remotePath, size) { progress ->
-                    report(progress.transferred, progress.total)
-                }
-            }
-            active.browser.invalidate()
-            active.browser.refresh()
-        }
-        message = "Uploading $name…"
-    }
-
-    private fun joinPath(dir: String, name: String): String =
-        if (dir.endsWith("/")) "$dir$name" else "$dir/$name"
-
-    private fun queryName(context: Context, uri: Uri): String? {
-        context.contentResolver.query(uri, null, null, null, null)?.use { cursor ->
-            val index = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
-            if (index >= 0 && cursor.moveToFirst()) return cursor.getString(index)
-        }
-        return uri.lastPathSegment
-    }
-
-    private fun querySize(context: Context, uri: Uri): Long {
-        context.contentResolver.query(uri, null, null, null, null)?.use { cursor ->
-            val index = cursor.getColumnIndex(OpenableColumns.SIZE)
-            if (index >= 0 && cursor.moveToFirst()) return cursor.getLong(index)
-        }
-        return 0
+    private fun joinPath(parent: String, child: String): String {
+        return if (parent == "/") "/$child" else "$parent/$child"
     }
 
     private companion object {
-        const val TAG = "FilesViewModel"
-        const val MAX_VISIBLE_TRANSFERS = 4
+        const val MAX_VISIBLE_TRANSFERS = 3
     }
 }

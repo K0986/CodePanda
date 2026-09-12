@@ -21,6 +21,8 @@ import kotlinx.coroutines.launch
  *
  * The cache is a bounded LRU: going back up a tree is instant, and a device with
  * a hundred thousand files cannot make the app grow without limit.
+ *
+ * ✨ ENHANCED: Now tracks cache hit/miss statistics for diagnostics.
  */
 class FileBrowser(
     private val scope: CoroutineScope,
@@ -38,6 +40,10 @@ class FileBrowser(
     }
 
     private var job: Job? = null
+    
+    // ✨ NEW: Cache diagnostics
+    private var cacheHits = 0
+    private var cacheMisses = 0
 
     /** Show [target], from cache when possible. */
     fun open(target: String, force: Boolean = false) {
@@ -47,11 +53,18 @@ class FileBrowser(
         if (!force) {
             val cached = synchronized(cache) { cache[normalised] }
             if (cached != null) {
+                cacheHits++
+                val totalAttempts = cacheHits + cacheMisses
+                val hitRate = (cacheHits * 100) / totalAttempts
+                AppLog.d(
+                    TAG,
+                    "Cache HIT: $normalised (${cached.size} items) | Stats: $cacheHits/$totalAttempts hits ($hitRate%)"
+                )
                 _listing.value = Async.Success(cached)
-                AppLog.v(TAG, "served $normalised from cache (${cached.size} entries)")
                 return
             }
         }
+        cacheMisses++
         load(normalised)
     }
 
@@ -68,6 +81,9 @@ class FileBrowser(
     fun invalidate(directory: String = _path.value) {
         synchronized(cache) { cache.remove(normalise(directory)) }
     }
+    
+    /** Get cache statistics for debugging. */
+    fun getCacheStats(): Pair<Int, Int> = cacheHits to cacheMisses
 
     private fun load(target: String) {
         job?.cancel()

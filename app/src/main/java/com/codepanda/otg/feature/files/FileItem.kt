@@ -1,5 +1,7 @@
 package com.codepanda.otg.feature.files
 
+import android.content.Context
+
 /** A file or directory on the connected device. */
 data class FileItem(
     val name: String,
@@ -9,8 +11,17 @@ data class FileItem(
     val sizeBytes: Long,
     val mtimeSeconds: Long,
     val mode: Int,
+    // ✨ NEW: Track per-entry access errors (e.g., EACCES, ENOENT)
+    val accessError: String? = null,
+    // ✨ NEW: Symlink target path (if this is a symlink)
+    val symlinkTarget: String? = null,
+    // ✨ NEW: Whether symlink target is a directory
+    val symlinkTargetIsDir: Boolean = false,
 ) {
     val permissions: String get() = formatMode(mode)
+    
+    /** True if this item is accessible (no permission errors). */
+    val isAccessible: Boolean get() = accessError == null
 
     companion object {
         /** Render a Unix st_mode as a `drwxr-xr-x`-style string. */
