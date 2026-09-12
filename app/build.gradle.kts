@@ -49,6 +49,14 @@ android {
         buildConfig = true
     }
 
+    testOptions {
+        unitTests {
+            // The logger mirrors to android.util.Log; in a JVM test that class is
+            // a stub, so returning defaults keeps logging inert instead of fatal.
+            isReturnDefaultValues = true
+        }
+    }
+
     packaging {
         resources {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
@@ -75,4 +83,5 @@ dependencies {
     debugImplementation(libs.androidx.ui.tooling)
 
     testImplementation(libs.junit)
+    testImplementation(libs.kotlinx.coroutines.test)
 }
