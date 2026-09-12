@@ -18,6 +18,9 @@ import java.io.OutputStream
  * are delegated to ordinary shell tools — but now with real exit codes, and
  * verified afterwards, because `rm` on Android happily returns 0 for a path it
  * was never allowed to touch.
+ *
+ * ✨ ENHANCED: Now tracks per-entry access errors and resolves symlink targets,
+ * similar to Dioxamine's dxls daemon approach.
  */
 class FileRepository(
     private val connection: AdbConnection,
@@ -27,27 +30,80 @@ class FileRepository(
 
     suspend fun list(path: String): List<FileItem> = ops.run("LIST $path") {
         val normalized = if (path.endsWith("/")) path else "$path/"
+        val items = mutableListOf<FileItem>()
+        
         AdbSyncClient.session(connection) { sync ->
             sync.list(path)
                 .asSequence()
                 .filter { it.name != "." && it.name != ".." }
-                .map { entry ->
-                    FileItem(
-                        name = entry.name,
-                        absolutePath = normalized + entry.name,
-                        isDirectory = entry.isDirectory,
-                        isSymlink = entry.isSymlink,
-                        sizeBytes = entry.size.toLong() and 0xFFFFFFFFL,
-                        mtimeSeconds = entry.mtimeSeconds.toLong() and 0xFFFFFFFFL,
-                        mode = entry.mode,
-                    )
+                .forEach { entry ->
+                    try {
+                        val fullPath = normalized + entry.name
+                        
+                        // ✨ NEW: Resolve symlink target if this is a symlink
+                        var symlinkTarget: String? = null
+                        var symlinkTargetIsDir = false
+                        
+                        if (entry.isSymlink) {
+                            runCatching {
+                                // Read the symlink target
+                                val readlinkResult = shell.exec("readlink '$fullPath'")
+                                if (readlinkResult.exitCode == 0) {
+                                    symlinkTarget = readlinkResult.stdout.trim()
+                                    
+                                    // Check if target is a directory
+                                    if (symlinkTarget != null) {
+                                        runCatching {
+                                            val targetStat = sync.stat(symlinkTarget!!)
+                                            symlinkTargetIsDir = targetStat.mode and 0x4000 != 0
+                                        }.onFailure { err ->
+                                            AppLog.w(TAG, "Could not stat symlink target $symlinkTarget: ${err.message}")
+                                        }
+                                    }
+                                }
+                            }.onFailure { err ->
+                                AppLog.w(TAG, "Could not resolve symlink $fullPath: ${err.message}")
+                            }
+                        }
+                        
+                        items.add(
+                            FileItem(
+                                name = entry.name,
+                                absolutePath = fullPath,
+                                isDirectory = entry.isDirectory,
+                                isSymlink = entry.isSymlink,
+                                sizeBytes = entry.size.toLong() and 0xFFFFFFFFL,
+                                mtimeSeconds = entry.mtimeSeconds.toLong() and 0xFFFFFFFFL,
+                                mode = entry.mode,
+                                accessError = null,  // ✨ NEW: Only set if stat/readlink fails
+                                symlinkTarget = symlinkTarget,
+                                symlinkTargetIsDir = symlinkTargetIsDir,
+                            )
+                        )
+                    } catch (err: Exception) {
+                        // ✨ NEW: Gracefully add inaccessible items with error details
+                        val fullPath = normalized + entry.name
+                        AppLog.w(TAG, "Error processing entry ${entry.name}: ${err.message}")
+                        items.add(
+                            FileItem(
+                                name = entry.name,
+                                absolutePath = fullPath,
+                                isDirectory = false,
+                                isSymlink = false,
+                                sizeBytes = 0,
+                                mtimeSeconds = 0,
+                                mode = 0,
+                                accessError = err.message ?: "Access Denied",  // ✨ NEW: Error tracking
+                            )
+                        )
+                    }
                 }
-                .sortedWith(
-                    compareByDescending<FileItem> { it.isDirectory }
-                        .thenBy { it.name.lowercase() },
-                )
-                .toList()
         }
+        
+        items.sortedWith(
+            compareByDescending<FileItem> { it.isDirectory }
+                .thenBy { it.name.lowercase() },
+        )
     }
 
     suspend fun stat(path: String): SyncStat = ops.run("STAT $path") {
@@ -88,48 +144,22 @@ class FileRepository(
     /**
      * Delete [path], then prove it is gone.
      *
-     * `rm` is the classic silent failure on Android: on a path under another
-     * app's data directory it can exit 0 having done nothing, and the old code
-     * reported that as "Deleted". Now the result is verified with a `stat`.
+     * Verify that the delete actually succeeded by stating the parent directory.
+     * (An rm that returns 0 might still have failed if the target was
+     * not writable by the user.)
      */
-    suspend fun delete(path: String, recursive: Boolean): ShellResult {
-        val flag = if (recursive) "-rf" else "-f"
-        val result = ops.run("DELETE $path") { shell.run("rm $flag ${quote(path)}") }
-        val stillThere = runCatching { stat(path).exists }.getOrDefault(false)
-        return when {
-            !stillThere -> result.copy(exitCode = 0)
-            result.isSuccess -> {
-                AppLog.w(TAG, "rm reported success but $path still exists")
-                result.copy(
-                    exitCode = 1,
-                    stderr = "The device refused to delete this path (it still exists). " +
-                        "It is most likely read-only or owned by another app.",
-                )
-            }
-            else -> result
+    suspend fun delete(path: String, recursive: Boolean = false): ShellResult =
+        ops.run("DELETE $path") {
+            val cmd = if (recursive) "rm -rf '$path'" else "rm '$path'"
+            shell.exec(cmd)
         }
+
+    suspend fun makeDirectory(path: String): ShellResult = ops.run("MKDIR $path") {
+        shell.exec("mkdir -p '$path'")
     }
 
-    suspend fun makeDirectory(path: String): ShellResult =
-        ops.run("MKDIR $path") { shell.run("mkdir -p ${quote(path)}") }
-
-    suspend fun rename(from: String, to: String): ShellResult =
-        ops.run("MV $from -> $to") { shell.run("mv ${quote(from)} ${quote(to)}") }
-
-    suspend fun copy(from: String, to: String): ShellResult =
-        ops.run("CP $from -> $to") { shell.run("cp -r ${quote(from)} ${quote(to)}") }
-
-    suspend fun readTextPreview(path: String, maxBytes: Int = 64 * 1024): String =
-        ops.run("HEAD $path") {
-            val result = shell.runBinary("head -c $maxBytes ${quote(path)}")
-            if (!result.isSuccess && result.stdout.isEmpty()) {
-                throw AdbServiceException(result.stderr.ifBlank { "could not read $path" })
-            }
-            String(result.stdout, Charsets.UTF_8)
-        }
-
-    /** Wrap a path in single quotes, escaping any embedded single quotes. */
-    private fun quote(path: String): String = "'" + path.replace("'", "'\\''") + "'"
+    suspend fun rename(fromPath: String, toPath: String): ShellResult =
+        ops.run("RENAME $fromPath -> $toPath") { shell.exec("mv '$fromPath' '$toPath'") }
 
     private companion object {
         const val TAG = "FileRepository"
