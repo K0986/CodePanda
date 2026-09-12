@@ -1,0 +1,5 @@
+Reverting PR #5: File logging, real command results, and a session that survives tab switches
+
+This is a marker file created to trigger a revert commit.
+Merge commit: 4ed3442ce3e17a1ccd00cae4ba887ca01822aeb4
+Base commit: 7ad10053e88ed693c73bcc31e0e97167f4888a92
