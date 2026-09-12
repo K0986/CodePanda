@@ -30,3 +30,13 @@ class AdbServiceException(message: String) : AdbException(message)
 /** Thrown when the transport dies unexpectedly (cable pulled, device rebooted). */
 class AdbTransportException(message: String, cause: Throwable? = null) :
     AdbException(message, cause)
+
+/**
+ * Thrown when a stream makes no progress within its budget.
+ *
+ * Distinct from the other failures because it is the one the UI must never
+ * swallow: a timeout is the difference between "this is slow" and "this will
+ * never finish", and turning it into a visible error is what stops a screen
+ * spinning forever.
+ */
+class AdbTimeoutException(message: String) : AdbException(message)

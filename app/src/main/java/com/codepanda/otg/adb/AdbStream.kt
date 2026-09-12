@@ -1,10 +1,13 @@
 package com.codepanda.otg.adb
 
+import com.codepanda.otg.core.log.AppLog
+import com.codepanda.otg.core.log.LogFormat
 import java.io.ByteArrayOutputStream
+import java.util.concurrent.ArrayBlockingQueue
 import java.util.concurrent.CountDownLatch
-import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.Semaphore
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicLong
 
 /**
  * A single logical ADB stream, multiplexed over the shared [AdbConnection].
@@ -14,12 +17,22 @@ import java.util.concurrent.TimeUnit
  * sending a `WRTE` we must wait for the peer's `OKAY` before sending the next.
  * That handshake is modelled with the [writeReady] semaphore.
  *
- * Incoming payloads are pushed onto [incoming] by the connection's reader thread
- * and consumed by callers through the blocking read helpers.
+ * Two properties matter for a UI that the user can navigate away from at any
+ * moment:
+ *
+ *  - **Every blocking call is bounded.** A read or write that makes no progress
+ *    within its timeout throws [AdbTimeoutException] instead of parking a thread
+ *    forever. A stalled stream used to be indistinguishable from a slow one, and
+ *    a parked thread still holds a stream open, which is what wedges adbd.
+ *  - **Every blocking call is interruptible.** The queue and semaphore both
+ *    throw `InterruptedException`, so wrapping calls in `runInterruptible` makes
+ *    coroutine cancellation actually cancel the I/O.
  */
 class AdbStream internal constructor(
     val localId: Int,
+    val service: String,
     private val connection: AdbConnection,
+    private val readTimeoutMs: Long = DEFAULT_READ_TIMEOUT_MS,
 ) {
     @Volatile
     var remoteId: Int = 0
@@ -32,8 +45,17 @@ class AdbStream internal constructor(
     private var closed = false
 
     private val openLatch = CountDownLatch(1)
-    private val incoming = LinkedBlockingQueue<ByteArray>()
+
+    /**
+     * Inbound payloads. Bounded on purpose: ADB permits a single unacknowledged
+     * `WRTE` per stream, so a handful of slots is always enough, and a bound
+     * means a fast producer can never grow the heap without limit.
+     */
+    private val incoming = ArrayBlockingQueue<ByteArray>(INCOMING_CAPACITY)
     private val writeReady = Semaphore(0)
+
+    private val bytesRead = AtomicLong(0)
+    private val bytesWritten = AtomicLong(0)
 
     // Leftover bytes from a chunk that a reader only partially consumed.
     private var pending: ByteArray? = null
@@ -41,6 +63,8 @@ class AdbStream internal constructor(
 
     val isOpen: Boolean get() = opened && !closed
     val isClosed: Boolean get() = closed
+    val totalBytesRead: Long get() = bytesRead.get()
+    val totalBytesWritten: Long get() = bytesWritten.get()
 
     // ---- Called by the reader thread --------------------------------------
 
@@ -60,7 +84,15 @@ class AdbStream internal constructor(
     }
 
     internal fun onPayload(data: ByteArray) {
-        if (!closed) incoming.offer(data)
+        if (closed) return
+        bytesRead.addAndGet(data.size.toLong())
+        // The queue is bounded, but because we only ack a payload once a reader
+        // has taken it, the device cannot be more than INCOMING_CAPACITY packets
+        // ahead of us; offer() therefore does not drop data in practice. If it
+        // ever did, silence would corrupt the stream, so it is logged loudly.
+        if (!incoming.offer(data)) {
+            AppLog.e(TAG, "stream $localId ($service) dropped ${data.size} B: inbound queue full")
+        }
     }
 
     internal fun onRemoteClose() {
@@ -83,15 +115,19 @@ class AdbStream internal constructor(
         var offset = 0
         val max = connection.maxPayload
         while (offset < data.size) {
-            if (closed) throw AdbServiceException("stream $localId closed")
+            if (closed) throw AdbServiceException("stream $localId ($service) is closed")
             val len = minOf(max, data.size - offset)
             if (!writeReady.tryAcquire(WRITE_ACK_TIMEOUT_MS, TimeUnit.MILLISECONDS)) {
-                throw AdbServiceException("timed out waiting for write ack on stream $localId")
+                throw AdbTimeoutException(
+                    "timed out after ${WRITE_ACK_TIMEOUT_MS}ms waiting for a write ack on " +
+                        "stream $localId ($service)",
+                )
             }
-            if (closed) throw AdbServiceException("stream $localId closed")
+            if (closed) throw AdbServiceException("stream $localId ($service) is closed")
             val chunk = if (offset == 0 && len == data.size) data
             else data.copyOfRange(offset, offset + len)
             connection.sendMessage(AdbMessage.write(localId, remoteId, chunk))
+            bytesWritten.addAndGet(len.toLong())
             offset += len
         }
     }
@@ -104,10 +140,15 @@ class AdbStream internal constructor(
      *
      * Handing a chunk to the caller is also what releases the device to send the
      * next one: see [ackConsumed].
+     *
+     * @throws AdbTimeoutException if nothing arrives within the read timeout.
      */
     fun read(max: Int = Int.MAX_VALUE): ByteArray? {
         val chunk = pending ?: run {
-            val next = incoming.take()
+            val next = incoming.poll(readTimeoutMs, TimeUnit.MILLISECONDS)
+                ?: throw AdbTimeoutException(
+                    "no data for ${readTimeoutMs}ms on stream $localId ($service)",
+                )
             if (next === EOF) {
                 // Re-arm EOF so repeated reads keep returning null.
                 incoming.offer(EOF)
@@ -136,7 +177,9 @@ class AdbStream internal constructor(
         var read = 0
         while (read < length) {
             val chunk = read(length - read)
-                ?: throw AdbServiceException("unexpected EOF on stream $localId")
+                ?: throw AdbServiceException(
+                    "unexpected EOF on stream $localId ($service) after $read/$length bytes",
+                )
             System.arraycopy(chunk, 0, buffer, offset + read, chunk.size)
             read += chunk.size
         }
@@ -148,29 +191,50 @@ class AdbStream internal constructor(
         return buffer
     }
 
-    /** Read everything until EOF and return it as one array. */
-    fun readAll(): ByteArray {
+    /**
+     * Read everything until EOF and return it as one array.
+     *
+     * [limitBytes] is a safety valve: a stray `dumpsys` or a `cat` of the wrong
+     * file could otherwise return hundreds of megabytes into the heap of a phone
+     * that is also decoding video.
+     */
+    fun readAll(limitBytes: Int = DEFAULT_READ_ALL_LIMIT): ByteArray {
         val out = ByteArrayOutputStream()
         while (true) {
             val chunk = read() ?: break
             out.write(chunk)
+            if (out.size() > limitBytes) {
+                AppLog.w(
+                    TAG,
+                    "stream $localId ($service) exceeded ${LogFormat.bytes(limitBytes.toLong())}; " +
+                        "truncating output",
+                )
+                break
+            }
         }
         return out.toByteArray()
     }
 
-    fun readAllText(): String = String(readAll(), Charsets.UTF_8)
+    fun readAllText(limitBytes: Int = DEFAULT_READ_ALL_LIMIT): String =
+        String(readAll(limitBytes), Charsets.UTF_8)
 
-    /** Politely close the stream from our side. */
+    /** Politely close the stream from our side. Idempotent. */
     fun close() {
         if (closed) return
         closed = true
-        // Wake any reader blocked in take(); without this the consumer thread
-        // (e.g. the video decoder) would park forever, because the device's CLSE
-        // reply can no longer be routed to this stream once it is unregistered.
+        // Wake any reader blocked in poll(); without this the consumer thread
+        // (e.g. the video decoder) would wait out its whole timeout, because the
+        // device's CLSE reply can no longer be routed to this stream once it is
+        // unregistered.
         incoming.offer(EOF)
         writeReady.release()
         runCatching { connection.sendMessage(AdbMessage.close(localId, remoteId)) }
         connection.unregister(localId)
+        AppLog.v(
+            TAG,
+            "closed stream $localId ($service): read ${LogFormat.bytes(bytesRead.get())}, " +
+                "wrote ${LogFormat.bytes(bytesWritten.get())}",
+        )
     }
 
     /**
@@ -187,7 +251,11 @@ class AdbStream internal constructor(
     }
 
     companion object {
+        private const val TAG = "AdbStream"
         private val EOF = ByteArray(0)
-        private const val WRITE_ACK_TIMEOUT_MS = 30_000L
+        private const val WRITE_ACK_TIMEOUT_MS = 20_000L
+        private const val DEFAULT_READ_TIMEOUT_MS = 30_000L
+        private const val INCOMING_CAPACITY = 8
+        private const val DEFAULT_READ_ALL_LIMIT = 16 * 1024 * 1024
     }
 }
