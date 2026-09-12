@@ -1,16 +1,25 @@
 package com.codepanda.otg.feature.deviceinfo
 
 import com.codepanda.otg.adb.service.AdbShell
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
+import com.codepanda.otg.core.session.AdbOps
 
 /**
  * Collects a broad snapshot of the connected device by combining `getprop`,
  * `/proc` files and a few `dumpsys` sections into human-readable groups.
  */
-class DeviceInfoRepository(private val shell: AdbShell) {
+class DeviceInfoRepository(
+    private val shell: AdbShell,
+    private val ops: AdbOps,
+) {
 
-    suspend fun load(): DeviceInfo = withContext(Dispatchers.IO) {
+    /**
+     * One snapshot of the device.
+     *
+     * This is a single exclusive operation on purpose: it issues seven commands
+     * back to back, and letting another screen interleave its own traffic
+     * halfway through is what used to leave both of them waiting on the cable.
+     */
+    suspend fun load(): DeviceInfo = ops.run("device info", timeoutMs = 90_000) {
         val props = parseGetProp(shell.exec("getprop"))
         val cpuInfo = shell.exec("cat /proc/cpuinfo")
         val memInfo = shell.exec("cat /proc/meminfo")

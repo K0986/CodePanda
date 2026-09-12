@@ -23,6 +23,7 @@ import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.Button
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FloatingActionButton
@@ -47,6 +48,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.codepanda.otg.ui.Async
 import com.codepanda.otg.ui.components.InfoRow
@@ -67,6 +69,9 @@ fun PackagesScreen(viewModel: PackagesViewModel = viewModel()) {
     val installPicker = rememberLauncherForActivityResult(
         ActivityResultContracts.GetContent(),
     ) { uri -> if (uri != null) viewModel.install(context, uri) }
+
+    val packages by viewModel.packages.collectAsStateWithLifecycle()
+    val transfers by viewModel.transfers.collectAsStateWithLifecycle()
 
     LaunchedEffect(viewModel.message) {
         viewModel.message?.let {
@@ -91,9 +96,22 @@ fun PackagesScreen(viewModel: PackagesViewModel = viewModel()) {
             FilterRow(viewModel)
             SearchField(viewModel)
 
-            when (val state = viewModel.state) {
-                is Async.Loading -> LoadingBox("Enumerating packages…")
-                is Async.Failure -> MessageBox("Couldn't list packages", state.message)
+            transfers.forEach { transfer ->
+                com.codepanda.otg.ui.components.TransferRow(
+                    transfer = transfer,
+                    onCancel = { id -> com.codepanda.otg.core.session.SessionManager.current?.transfers?.cancel(id) },
+                    onDismiss = { id -> com.codepanda.otg.core.session.SessionManager.current?.transfers?.dismiss(id) },
+                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp),
+                )
+            }
+
+            when (val state = packages) {
+                is Async.Idle, is Async.Loading -> LoadingBox("Enumerating packages…")
+                is Async.Failure -> MessageBox(
+                    title = "Couldn't list packages",
+                    subtitle = state.message,
+                    action = { Button(onClick = viewModel::refresh) { Text("Retry") } },
+                )
                 is Async.Success -> {
                     val list = viewModel.filtered()
                     if (list.isEmpty()) {
@@ -114,9 +132,10 @@ fun PackagesScreen(viewModel: PackagesViewModel = viewModel()) {
     if (details != null) {
         ModalBottomSheet(onDismissRequest = viewModel::closeDetails) {
             when (details) {
-                is Async.Loading -> Box(Modifier.fillMaxWidth().padding(40.dp), Alignment.Center) {
-                    CircularProgressIndicator(color = PandaCyan)
-                }
+                is Async.Idle, is Async.Loading ->
+                    Box(Modifier.fillMaxWidth().padding(40.dp), Alignment.Center) {
+                        CircularProgressIndicator(color = PandaCyan)
+                    }
                 is Async.Failure -> Text(
                     details.message,
                     Modifier.padding(24.dp),

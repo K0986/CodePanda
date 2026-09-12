@@ -3,8 +3,11 @@ package com.codepanda.otg.feature.packages
 import com.codepanda.otg.adb.AdbConnection
 import com.codepanda.otg.adb.service.AdbShell
 import com.codepanda.otg.adb.service.AdbSyncClient
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
+import com.codepanda.otg.adb.service.ExecFallback
+import com.codepanda.otg.adb.service.ShellResult
+import com.codepanda.otg.adb.service.SyncProgress
+import com.codepanda.otg.core.log.AppLog
+import com.codepanda.otg.core.session.AdbOps
 import java.io.InputStream
 import java.io.OutputStream
 
@@ -15,16 +18,26 @@ import java.io.OutputStream
  *
  * All of this is expressed in terms of the `pm`/`cmd package`/`am` shell tools
  * that ship on every Android device — no root required for the common cases.
+ *
+ * Every mutating call returns the device's real [ShellResult]. That is the fix
+ * for "app operations don't work": `pm` reports its refusals on **stderr** with
+ * a non-zero exit status, and the old `exec:`-only path threw both away, so a
+ * failed uninstall was indistinguishable from a successful one.
  */
 class PackageRepository(
     private val connection: AdbConnection,
     private val shell: AdbShell,
+    private val ops: AdbOps,
 ) {
 
-    suspend fun listPackages(): List<AppPackage> = withContext(Dispatchers.IO) {
+    suspend fun listPackages(): List<AppPackage> = ops.run("list packages", timeoutMs = 90_000) {
         val pathByPkg = parsePackagePaths(shell.exec("pm list packages -f"))
         val systemPkgs = parsePackageNames(shell.exec("pm list packages -s"))
         val disabledPkgs = parsePackageNames(shell.exec("pm list packages -d"))
+
+        if (pathByPkg.isEmpty()) {
+            AppLog.w(TAG, "pm list packages returned nothing; is this device really adbd-enabled?")
+        }
 
         pathByPkg.keys.sorted().map { pkg ->
             AppPackage(
@@ -36,79 +49,84 @@ class PackageRepository(
         }
     }
 
-    suspend fun getDetails(packageName: String): AppPackageDetails = withContext(Dispatchers.IO) {
-        val dump = shell.exec("dumpsys package $packageName")
-        val apkPaths = apkPathsFor(packageName)
-        AppPackageDetails(
-            packageName = packageName,
-            versionName = firstMatch(dump, Regex("""versionName=(\S+)""")),
-            versionCode = firstMatch(dump, Regex("""versionCode=(\d+)""")),
-            minSdk = firstMatch(dump, Regex("""minSdk=(\d+)""")),
-            targetSdk = firstMatch(dump, Regex("""targetSdk=(\d+)""")),
-            installerPackage = firstMatch(dump, Regex("""installerPackageName=(\S+)""")),
-            firstInstall = firstMatch(dump, Regex("""firstInstallTime=(.+)""")),
-            lastUpdate = firstMatch(dump, Regex("""lastUpdateTime=(.+)""")),
-            dataDir = firstMatch(dump, Regex("""dataDir=(\S+)""")),
-            apkPaths = apkPaths,
-            requestedPermissions = parseRequestedPermissions(dump),
-        )
-    }
-
-    suspend fun setEnabled(packageName: String, enabled: Boolean): CommandResult =
-        withContext(Dispatchers.IO) {
-            val cmd = if (enabled) "pm enable $packageName"
-            else "pm disable-user --user 0 $packageName"
-            CommandResult.from(shell.exec(cmd))
+    suspend fun getDetails(packageName: String): AppPackageDetails =
+        ops.run("details $packageName") {
+            val dump = shell.exec("dumpsys package $packageName")
+            val apkPaths = parseApkPaths(shell.exec("pm path $packageName"))
+            AppPackageDetails(
+                packageName = packageName,
+                versionName = firstMatch(dump, Regex("""versionName=(\S+)""")),
+                versionCode = firstMatch(dump, Regex("""versionCode=(\d+)""")),
+                minSdk = firstMatch(dump, Regex("""minSdk=(\d+)""")),
+                targetSdk = firstMatch(dump, Regex("""targetSdk=(\d+)""")),
+                installerPackage = firstMatch(dump, Regex("""installerPackageName=(\S+)""")),
+                firstInstall = firstMatch(dump, Regex("""firstInstallTime=(.+)""")),
+                lastUpdate = firstMatch(dump, Regex("""lastUpdateTime=(.+)""")),
+                dataDir = firstMatch(dump, Regex("""dataDir=(\S+)""")),
+                apkPaths = apkPaths,
+                requestedPermissions = parseRequestedPermissions(dump),
+            )
         }
 
-    suspend fun forceStop(packageName: String): CommandResult = withContext(Dispatchers.IO) {
-        // am force-stop is silent on success, so treat empty output as success.
-        val out = shell.exec("am force-stop $packageName")
-        if (out.isBlank()) CommandResult(true, "Force-stopped") else CommandResult.from(out)
-    }
+    suspend fun setEnabled(packageName: String, enabled: Boolean): ShellResult =
+        ops.run("${if (enabled) "enable" else "disable"} $packageName") {
+            val command = if (enabled) {
+                "pm enable --user 0 $packageName"
+            } else {
+                "pm disable-user --user 0 $packageName"
+            }
+            shell.run(command)
+        }
 
-    suspend fun clearData(packageName: String): CommandResult = withContext(Dispatchers.IO) {
-        CommandResult.from(shell.exec("pm clear $packageName"))
-    }
+    suspend fun forceStop(packageName: String): ShellResult =
+        ops.run("force-stop $packageName") { shell.run("am force-stop $packageName") }
 
-    suspend fun uninstall(packageName: String, keepData: Boolean = false): CommandResult =
-        withContext(Dispatchers.IO) {
+    suspend fun clearData(packageName: String): ShellResult =
+        ops.run("clear $packageName") { shell.run("pm clear $packageName") }
+
+    suspend fun uninstall(packageName: String, keepData: Boolean = false): ShellResult =
+        ops.run("uninstall $packageName") {
             val keep = if (keepData) "-k " else ""
-            CommandResult.from(shell.exec("pm uninstall $keep$packageName"))
+            shell.run("pm uninstall $keep$packageName")
         }
 
     /** Remove a (bloatware) app for the current user without root. Reversible. */
-    suspend fun uninstallForUser(packageName: String): CommandResult =
-        withContext(Dispatchers.IO) {
-            CommandResult.from(shell.exec("pm uninstall -k --user 0 $packageName"))
+    suspend fun uninstallForUser(packageName: String): ShellResult =
+        ops.run("uninstall --user 0 $packageName") {
+            shell.run("pm uninstall -k --user 0 $packageName")
         }
 
     /** Re-install a previously user-uninstalled system app for user 0. */
-    suspend fun reinstallExisting(packageName: String): CommandResult =
-        withContext(Dispatchers.IO) {
-            CommandResult.from(shell.exec("cmd package install-existing $packageName"))
+    suspend fun reinstallExisting(packageName: String): ShellResult =
+        ops.run("install-existing $packageName") {
+            shell.run("cmd package install-existing $packageName")
         }
 
-    suspend fun apkPathsFor(packageName: String): List<String> = withContext(Dispatchers.IO) {
-        shell.exec("pm path $packageName")
-            .lineSequence()
-            .mapNotNull { it.trim().removePrefix("package:").ifBlank { null } }
-            .toList()
+    suspend fun apkPathsFor(packageName: String): List<String> =
+        ops.run("pm path $packageName") { parseApkPaths(shell.exec("pm path $packageName")) }
+
+    /** Size of the base APK, so an extraction can show real progress. */
+    suspend fun apkSize(packageName: String): Long {
+        val path = apkPathsFor(packageName).firstOrNull() ?: return 0
+        return ops.run("stat $path") {
+            AdbSyncClient.session(connection) { it.stat(path).sizeBytes }
+        }
     }
 
     /** Pull the base APK of [packageName] into [out]. */
     suspend fun extractApk(
         packageName: String,
         out: OutputStream,
-        onProgress: (Long) -> Unit = {},
-    ): Long = withContext(Dispatchers.IO) {
+        onProgress: (SyncProgress) -> Unit = {},
+    ): Long {
         val path = apkPathsFor(packageName).firstOrNull()
             ?: throw IllegalStateException("No APK path for $packageName")
-        var total = 0L
-        AdbSyncClient(connection).use { sync ->
-            sync.pull(path, out) { total = it; onProgress(it) }
+        val total = ops.run("stat $path") {
+            AdbSyncClient.session(connection) { it.stat(path).sizeBytes }
         }
-        total
+        return ops.run("extract $packageName", timeoutMs = AdbOps.TRANSFER_TIMEOUT_MS) {
+            AdbSyncClient.session(connection) { sync -> sync.pull(path, out, total, onProgress) }
+        }
     }
 
     /**
@@ -122,33 +140,67 @@ class PackageRepository(
     suspend fun installStreaming(
         input: InputStream,
         size: Long,
-        onProgress: (Long) -> Unit = {},
-    ): CommandResult = withContext(Dispatchers.IO) {
+        onProgress: (sent: Long, total: Long) -> Unit = { _, _ -> },
+    ): ShellResult {
         require(size > 0) { "APK size must be known to stream-install (got $size)" }
-        val stream = connection.open("exec:cmd package install -r -S $size")
-        try {
-            val buffer = ByteArray(64 * 1024)
-            var sent = 0L
-            while (sent < size) {
-                val read = input.read(buffer)
-                if (read <= 0) break
-                stream.write(if (read == buffer.size) buffer else buffer.copyOf(read))
-                sent += read
-                onProgress(sent)
+        val base = "cmd package install -r -S $size"
+        val command = if (shell.supportsShellV2) base else ExecFallback.wrap(base)
+
+        return ops.run("install ($size bytes)", timeoutMs = AdbOps.TRANSFER_TIMEOUT_MS) {
+            shell.openStreaming(command).use { running ->
+                val buffer = ByteArray(CHUNK)
+                var sent = 0L
+                while (sent < size) {
+                    val read = input.read(buffer)
+                    if (read <= 0) break
+                    running.writeStdin(buffer, read)
+                    sent += read
+                    onProgress(sent, size)
+                }
+                running.closeStdin()
+
+                if (sent != size) {
+                    return@run ShellResult(
+                        command = base,
+                        exitCode = 1,
+                        stdout = "",
+                        stderr = "Aborted: expected $size bytes but the source provided $sent",
+                    )
+                }
+
+                val output = running.drainStdoutText()
+                if (shell.supportsShellV2) {
+                    ShellResult(
+                        command = base,
+                        exitCode = running.exitCode ?: ShellResult.EXIT_UNKNOWN,
+                        stdout = output,
+                        stderr = running.stderrText,
+                    )
+                } else {
+                    // On the fallback path the status arrives as a trailing marker.
+                    ExecFallback.parse(base, output).let { parsed ->
+                        if (parsed.exitCode == ShellResult.EXIT_UNKNOWN &&
+                            parsed.stdout.contains("Success", ignoreCase = true)
+                        ) {
+                            parsed.copy(exitCode = 0)
+                        } else {
+                            parsed
+                        }
+                    }
+                }
             }
-            if (sent != size) {
-                return@withContext CommandResult(
-                    false,
-                    "Aborted: expected $size bytes but the source provided $sent",
-                )
-            }
-            CommandResult.from(stream.readAllText())
-        } finally {
-            stream.close()
         }
     }
 
     // ---- parsing helpers ---------------------------------------------------
+
+    private fun parseApkPaths(output: String): List<String> =
+        output.lineSequence()
+            .map { it.trim() }
+            .filter { it.startsWith("package:") }
+            .map { it.removePrefix("package:") }
+            .filter { it.isNotBlank() }
+            .toList()
 
     private fun parsePackagePaths(output: String): Map<String, String> {
         val map = LinkedHashMap<String, String>()
@@ -187,16 +239,9 @@ class PackageRepository(
 
     private fun firstMatch(text: String, regex: Regex): String? =
         regex.find(text)?.groupValues?.getOrNull(1)?.trim()
-}
 
-/** Outcome of a `pm`/`am`-style command that reports Success/Failure textually. */
-data class CommandResult(val success: Boolean, val message: String) {
-    companion object {
-        fun from(output: String): CommandResult {
-            val trimmed = output.trim()
-            val success = trimmed.contains("Success", ignoreCase = true) ||
-                trimmed.isEmpty()
-            return CommandResult(success, trimmed.ifBlank { "OK" })
-        }
+    private companion object {
+        const val TAG = "PackageRepository"
+        const val CHUNK = 64 * 1024
     }
 }

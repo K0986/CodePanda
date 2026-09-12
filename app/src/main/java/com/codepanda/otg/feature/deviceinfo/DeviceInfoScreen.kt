@@ -20,6 +20,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.codepanda.otg.ui.Async
 import com.codepanda.otg.ui.components.InfoRow
@@ -29,13 +30,15 @@ import com.codepanda.otg.ui.components.SectionCard
 
 @Composable
 fun DeviceInfoScreen(viewModel: DeviceInfoViewModel = viewModel()) {
-    when (val state = viewModel.state) {
-        is Async.Loading -> LoadingBox("Reading device properties…")
+    val info by viewModel.info.collectAsStateWithLifecycle()
+
+    when (val state = info) {
+        is Async.Idle, is Async.Loading -> LoadingBox("Reading device properties…")
         is Async.Failure -> MessageBox(
             title = "Couldn't read device info",
             subtitle = state.message,
             icon = Icons.Filled.ErrorOutline,
-            action = { TextButton(onClick = viewModel::load) { Text("Retry") } },
+            action = { TextButton(onClick = viewModel::refresh) { Text("Retry") } },
         )
         is Async.Success -> DeviceInfoContent(state.data)
     }

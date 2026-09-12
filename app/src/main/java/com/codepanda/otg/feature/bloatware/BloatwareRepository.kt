@@ -1,9 +1,9 @@
 package com.codepanda.otg.feature.bloatware
 
 import com.codepanda.otg.adb.service.AdbShell
-import com.codepanda.otg.feature.packages.CommandResult
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
+import com.codepanda.otg.adb.service.ShellResult
+import com.codepanda.otg.core.log.AppLog
+import com.codepanda.otg.core.session.AdbOps
 
 /**
  * Debloating without root. On modern Android you cannot truly *delete* a
@@ -17,14 +17,23 @@ import kotlinx.coroutines.withContext
  *
  * Both are fully reversible, which is why this screen leans on them.
  */
-class BloatwareRepository(private val shell: AdbShell) {
+class BloatwareRepository(
+    private val shell: AdbShell,
+    private val ops: AdbOps,
+) {
 
-    suspend fun list(): List<BloatApp> = withContext(Dispatchers.IO) {
+    suspend fun list(): List<BloatApp> = ops.run("list system apps", timeoutMs = 90_000) {
         val installed = names(shell.exec("pm list packages -s"))
         val disabled = names(shell.exec("pm list packages -d"))
         // `-u` includes packages uninstalled for the user but still on the image.
         val allIncludingUninstalled = names(shell.exec("pm list packages -s -u"))
         val removedForUser = allIncludingUninstalled - installed
+
+        AppLog.i(
+            TAG,
+            "system apps: ${installed.size} installed, ${disabled.size} disabled, " +
+                "${removedForUser.size} removed for user 0",
+        )
 
         (installed + removedForUser).distinct().sorted().map { pkg ->
             val known = CATALOG[pkg] ?: CATALOG.entries.firstOrNull { pkg.startsWith(it.key) }?.value
@@ -39,21 +48,17 @@ class BloatwareRepository(private val shell: AdbShell) {
         }
     }
 
-    suspend fun disableForUser(pkg: String): CommandResult = withContext(Dispatchers.IO) {
-        CommandResult.from(shell.exec("pm disable-user --user 0 $pkg"))
-    }
+    suspend fun disableForUser(pkg: String): ShellResult =
+        ops.run("disable-user $pkg") { shell.run("pm disable-user --user 0 $pkg") }
 
-    suspend fun enable(pkg: String): CommandResult = withContext(Dispatchers.IO) {
-        CommandResult.from(shell.exec("pm enable $pkg"))
-    }
+    suspend fun enable(pkg: String): ShellResult =
+        ops.run("enable $pkg") { shell.run("pm enable --user 0 $pkg") }
 
-    suspend fun uninstallForUser(pkg: String): CommandResult = withContext(Dispatchers.IO) {
-        CommandResult.from(shell.exec("pm uninstall -k --user 0 $pkg"))
-    }
+    suspend fun uninstallForUser(pkg: String): ShellResult =
+        ops.run("uninstall --user 0 $pkg") { shell.run("pm uninstall -k --user 0 $pkg") }
 
-    suspend fun reinstall(pkg: String): CommandResult = withContext(Dispatchers.IO) {
-        CommandResult.from(shell.exec("cmd package install-existing $pkg"))
-    }
+    suspend fun reinstall(pkg: String): ShellResult =
+        ops.run("install-existing $pkg") { shell.run("cmd package install-existing $pkg") }
 
     private fun names(output: String): Set<String> =
         output.lineSequence()
@@ -65,6 +70,8 @@ class BloatwareRepository(private val shell: AdbShell) {
     private data class Known(val name: String, val description: String, val safety: BloatSafety)
 
     companion object {
+        private const val TAG = "BloatwareRepository"
+
         /**
          * A small, opinionated catalog of common bloatware. Prefix matches let a
          * whole vendor family (e.g. `com.facebook.`) be flagged at once.

@@ -74,6 +74,25 @@ object AdbProtocol {
         return (sum and 0xffffffffL).toInt()
     }
 
+    /**
+     * Feature flags out of a device's connect banner.
+     *
+     * A banner looks like
+     * `device::ro.product.name=sdk;...;features=cmd,shell_v2,stat_v2,abb_exec`.
+     * The feature list is what tells us whether we may use `shell_v2` (real exit
+     * codes and stderr) or have to fall back to `exec:` with a status marker.
+     */
+    fun parseFeatures(banner: String): Set<String> {
+        val segment = banner.split(';', ':')
+            .firstOrNull { it.startsWith("features=") }
+            ?: return emptySet()
+        return segment.removePrefix("features=")
+            .split(',')
+            .map { it.trim() }
+            .filter { it.isNotEmpty() }
+            .toSet()
+    }
+
     fun commandName(command: Int): String = when (command) {
         A_CNXN -> "CNXN"
         A_AUTH -> "AUTH"

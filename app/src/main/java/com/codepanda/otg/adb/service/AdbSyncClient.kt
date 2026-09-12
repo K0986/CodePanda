@@ -3,6 +3,8 @@ package com.codepanda.otg.adb.service
 import com.codepanda.otg.adb.AdbConnection
 import com.codepanda.otg.adb.AdbServiceException
 import com.codepanda.otg.adb.AdbStream
+import com.codepanda.otg.core.log.AppLog
+import com.codepanda.otg.core.log.LogFormat
 import java.io.InputStream
 import java.io.OutputStream
 import java.nio.ByteBuffer
@@ -31,6 +33,18 @@ data class SyncDirEntry(
 data class SyncStat(val mode: Int, val size: Int, val mtimeSeconds: Int) {
     val exists: Boolean get() = mode != 0
     val isDirectory: Boolean get() = mode and SyncDirEntry.S_IFMT == SyncDirEntry.S_IFDIR
+    val sizeBytes: Long get() = size.toLong() and 0xFFFFFFFFL
+}
+
+/** Progress of a transfer, reported often enough to drive a progress bar. */
+data class SyncProgress(
+    val transferred: Long,
+    val total: Long,
+    val elapsedMs: Long,
+) {
+    /** 0..1, or null when the total is unknown (a stream of unknown length). */
+    val fraction: Float? get() = if (total > 0) (transferred.toFloat() / total).coerceIn(0f, 1f) else null
+    val bytesPerSecond: Long get() = if (elapsedMs > 0) transferred * 1000 / elapsedMs else 0
 }
 
 /**
@@ -39,34 +53,44 @@ data class SyncStat(val mode: Int, val size: Int, val mtimeSeconds: Int) {
  * four-byte tags (`LIST`, `STAT`, `RECV`, `SEND`, `DATA`, `DONE`, `OKAY`, `FAIL`).
  *
  * This is precisely the machinery behind `adb push` and `adb pull`.
+ *
+ * Instances are always created through [session], which ties the underlying
+ * stream's lifetime to the block: an abandoned `sync:` stream blocks adbd for
+ * every other feature, so it must never outlive its caller — not even when that
+ * caller is cancelled because the user switched tabs.
  */
-class AdbSyncClient(connection: AdbConnection) : AutoCloseable {
-
-    private val stream: AdbStream = connection.open("sync:")
+class AdbSyncClient private constructor(private val stream: AdbStream) {
 
     /** List the immediate children of directory [path]. */
     fun list(path: String): List<SyncDirEntry> {
         sendRequest(ID_LIST, path)
         val entries = mutableListOf<SyncDirEntry>()
         while (true) {
-            val tag = readTag()
-            when (tag) {
+            when (val tag = readTag()) {
                 ID_DENT -> {
                     val mode = readInt()
                     val size = readInt()
                     val time = readInt()
                     val nameLen = readInt()
+                    if (nameLen < 0 || nameLen > MAX_NAME) {
+                        throw AdbServiceException("implausible directory entry name length: $nameLen")
+                    }
                     val name = String(stream.readExact(nameLen), Charsets.UTF_8)
                     entries += SyncDirEntry(name, mode, size, time)
+                    if (entries.size > MAX_ENTRIES) {
+                        AppLog.w(TAG, "LIST $path truncated at $MAX_ENTRIES entries")
+                        break
+                    }
                 }
                 ID_DONE -> {
                     stream.readExact(DONE_TRAILER) // mode/size/time trailer, ignored
                     break
                 }
-                ID_FAIL -> throw AdbServiceException("LIST failed: ${readFailMessage()}")
+                ID_FAIL -> throw AdbServiceException("LIST $path failed: ${readFailMessage()}")
                 else -> throw AdbServiceException("unexpected sync tag: $tag")
             }
         }
+        AppLog.d(TAG, "LIST $path -> ${entries.size} entries")
         return entries
     }
 
@@ -81,28 +105,61 @@ class AdbSyncClient(connection: AdbConnection) : AutoCloseable {
         return SyncStat(mode, size, time)
     }
 
-    /** Pull remote [path] into [out], reporting bytes transferred via [onProgress]. */
-    fun pull(path: String, out: OutputStream, onProgress: (Long) -> Unit = {}) {
+    /**
+     * Pull remote [path] into [out].
+     *
+     * [total] (usually from [stat]) lets callers show a real percentage instead
+     * of an indeterminate spinner; pass 0 when it is genuinely unknown.
+     */
+    fun pull(
+        path: String,
+        out: OutputStream,
+        total: Long = 0,
+        onProgress: (SyncProgress) -> Unit = {},
+    ): Long {
+        val started = System.currentTimeMillis()
+        AppLog.i(TAG, "RECV $path (${if (total > 0) LogFormat.bytes(total) else "size unknown"})")
         sendRequest(ID_RECV, path)
-        var total = 0L
+        var transferred = 0L
+        var lastReport = 0L
         while (true) {
             when (val tag = readTag()) {
                 ID_DATA -> {
                     val len = readInt()
-                    val chunk = stream.readExact(len)
-                    out.write(chunk)
-                    total += len
-                    onProgress(total)
+                    if (len < 0 || len > MAX_CHUNK) {
+                        throw AdbServiceException("implausible DATA length: $len")
+                    }
+                    var remaining = len
+                    while (remaining > 0) {
+                        val chunk = stream.read(remaining)
+                            ?: throw AdbServiceException("stream ended mid-file at $transferred bytes")
+                        out.write(chunk)
+                        transferred += chunk.size
+                        remaining -= chunk.size
+                    }
+                    val now = System.currentTimeMillis()
+                    if (now - lastReport >= PROGRESS_INTERVAL_MS) {
+                        lastReport = now
+                        onProgress(SyncProgress(transferred, total, now - started))
+                    }
                 }
                 ID_DONE -> {
                     stream.readExact(4) // mtime trailer
                     break
                 }
-                ID_FAIL -> throw AdbServiceException("RECV failed: ${readFailMessage()}")
+                ID_FAIL -> throw AdbServiceException("RECV $path failed: ${readFailMessage()}")
                 else -> throw AdbServiceException("unexpected sync tag: $tag")
             }
         }
         out.flush()
+        val elapsed = System.currentTimeMillis() - started
+        onProgress(SyncProgress(transferred, maxOf(total, transferred), elapsed))
+        AppLog.i(
+            TAG,
+            "RECV $path done: ${LogFormat.bytes(transferred)} in ${elapsed}ms " +
+                "(${LogFormat.bytes(if (elapsed > 0) transferred * 1000 / elapsed else 0)}/s)",
+        )
+        return transferred
     }
 
     /**
@@ -112,37 +169,48 @@ class AdbSyncClient(connection: AdbConnection) : AutoCloseable {
     fun push(
         input: InputStream,
         remotePath: String,
+        total: Long = 0,
         mode: Int = 0x81A4, // 0100644
         mtimeSeconds: Int = (System.currentTimeMillis() / 1000).toInt(),
-        onProgress: (Long) -> Unit = {},
-    ) {
+        onProgress: (SyncProgress) -> Unit = {},
+    ): Long {
+        val started = System.currentTimeMillis()
+        AppLog.i(TAG, "SEND $remotePath (${if (total > 0) LogFormat.bytes(total) else "size unknown"})")
         // SEND argument is "path,mode".
         sendRequest(ID_SEND, "$remotePath,$mode")
         val buffer = ByteArray(SYNC_DATA_MAX)
-        var total = 0L
+        var transferred = 0L
+        var lastReport = 0L
         while (true) {
             val read = input.read(buffer)
             if (read <= 0) break
             sendDataChunk(buffer, read)
-            total += read
-            onProgress(total)
+            transferred += read
+            val now = System.currentTimeMillis()
+            if (now - lastReport >= PROGRESS_INTERVAL_MS) {
+                lastReport = now
+                onProgress(SyncProgress(transferred, total, now - started))
+            }
         }
         // DONE carries the modification time in the "length" slot.
         stream.write(tagWithLength(ID_DONE, mtimeSeconds))
 
         when (val tag = readTag()) {
             ID_OKAY -> readInt() // trailing length, ignored
-            ID_FAIL -> throw AdbServiceException("SEND failed: ${readFailMessage()}")
+            ID_FAIL -> throw AdbServiceException("SEND $remotePath failed: ${readFailMessage()}")
             else -> throw AdbServiceException("unexpected sync tag after SEND: $tag")
         }
+        val elapsed = System.currentTimeMillis() - started
+        onProgress(SyncProgress(transferred, maxOf(total, transferred), elapsed))
+        AppLog.i(TAG, "SEND $remotePath done: ${LogFormat.bytes(transferred)} in ${elapsed}ms")
+        return transferred
     }
 
-    override fun close() {
+    private fun quit() {
         runCatching {
             // "QUIT" gracefully ends the sync session.
             stream.write(tagWithLength(ID_QUIT, 0))
         }
-        stream.close()
     }
 
     // ---- wire helpers ------------------------------------------------------
@@ -172,10 +240,13 @@ class AdbSyncClient(connection: AdbConnection) : AutoCloseable {
 
     private fun readFailMessage(): String {
         val len = readInt()
+        if (len < 0 || len > MAX_NAME) return "(unreadable error of $len bytes)"
         return String(stream.readExact(len), Charsets.UTF_8)
     }
 
     companion object {
+        private const val TAG = "AdbSync"
+
         private const val ID_LIST = "LIST"
         private const val ID_DENT = "DENT"
         private const val ID_STAT = "STAT"
@@ -189,5 +260,23 @@ class AdbSyncClient(connection: AdbConnection) : AutoCloseable {
 
         private const val SYNC_DATA_MAX = 64 * 1024
         private const val DONE_TRAILER = 16
+        private const val MAX_NAME = 4096
+        private const val MAX_CHUNK = 1024 * 1024
+        private const val MAX_ENTRIES = 20_000
+        private const val PROGRESS_INTERVAL_MS = 150L
+
+        /**
+         * Run [block] against a fresh `sync:` session, closing the stream on
+         * every exit path (success, failure, or coroutine cancellation).
+         */
+        fun <T> session(connection: AdbConnection, block: (AdbSyncClient) -> T): T =
+            connection.withStream("sync:") { stream ->
+                val client = AdbSyncClient(stream)
+                try {
+                    block(client)
+                } finally {
+                    client.quit()
+                }
+            }
     }
 }

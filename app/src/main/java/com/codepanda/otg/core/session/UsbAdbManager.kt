@@ -11,6 +11,7 @@ import android.os.Build
 import androidx.core.content.ContextCompat
 import com.codepanda.otg.adb.AdbConnection
 import com.codepanda.otg.adb.AdbCrypto
+import com.codepanda.otg.core.log.AppLog
 import com.codepanda.otg.usb.UsbDeviceScanner
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -37,14 +38,25 @@ class UsbAdbManager(private val context: Context) {
     private var connectingDeviceId: Int? = null
     private var receiverRegistered = false
 
-    fun compatibleDevices(): List<UsbDevice> = UsbDeviceScanner.compatibleDevices(usbManager)
+    fun compatibleDevices(): List<UsbDevice> {
+        val devices = UsbDeviceScanner.compatibleDevices(usbManager)
+        AppLog.d(
+            TAG,
+            "Scan found ${devices.size} ADB-capable device(s) of ${usbManager.deviceList.size} attached" +
+                devices.joinToString(prefix = ": ", separator = ", ") { displayName(it) }
+                    .takeIf { devices.isNotEmpty() }.orEmpty(),
+        )
+        return devices
+    }
 
     /** Kick off a connection: request permission if needed, then handshake. */
     fun connect(device: UsbDevice) {
         ensureReceiver()
         if (usbManager.hasPermission(device)) {
+            AppLog.i(TAG, "USB permission already granted for ${displayName(device)}")
             startConnect(device)
         } else {
+            AppLog.i(TAG, "Requesting USB permission for ${displayName(device)}")
             SessionManager.setConnecting(displayName(device))
             val flags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
                 PendingIntent.FLAG_MUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
@@ -64,18 +76,25 @@ class UsbAdbManager(private val context: Context) {
 
     private fun startConnect(device: UsbDevice) {
         connectingDeviceId = device.deviceId
-        SessionManager.setConnecting(displayName(device))
+        val name = displayName(device)
+        SessionManager.setConnecting(name)
         scope.launch {
             try {
+                AppLog.i(
+                    TAG,
+                    "Opening transport to $name (vendor=0x%04x product=0x%04x)"
+                        .format(device.vendorId, device.productId),
+                )
                 val transport = UsbDeviceScanner.openTransport(usbManager, device)
                 val connection = AdbConnection(transport, crypto)
                 connection.connect()
                 SessionManager.setConnected(
-                    session = DeviceSession(connection),
-                    deviceName = displayName(device),
+                    session = DeviceSession(connection, name),
+                    deviceName = name,
                     banner = connection.deviceBanner,
                 )
             } catch (t: Throwable) {
+                AppLog.e(TAG, "Connect to $name failed", t)
                 SessionManager.setFailed(t.message ?: "Failed to connect")
             }
         }
@@ -111,14 +130,17 @@ class UsbAdbManager(private val context: Context) {
                     val granted =
                         intent.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED, false)
                     if (granted) {
+                        AppLog.i(TAG, "USB permission granted for ${displayName(device)}")
                         startConnect(device)
                     } else {
+                        AppLog.w(TAG, "USB permission denied for ${displayName(device)}")
                         SessionManager.setFailed("USB permission was denied.")
                     }
                 }
 
                 UsbManager.ACTION_USB_DEVICE_DETACHED -> {
                     val device = intent.usbDevice()
+                    AppLog.w(TAG, "USB device detached: ${device?.let { displayName(it) } ?: "unknown"}")
                     if (device == null || device.deviceId == connectingDeviceId ||
                         SessionManager.state.value is ConnectionState.Connected
                     ) {
@@ -142,6 +164,7 @@ class UsbAdbManager(private val context: Context) {
         }
 
     companion object {
+        private const val TAG = "UsbAdbManager"
         private const val ACTION_USB_PERMISSION = "com.codepanda.otg.USB_PERMISSION"
     }
 }

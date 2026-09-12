@@ -1,6 +1,7 @@
 package com.codepanda.otg.ui.navigation
 
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.Article
 import androidx.compose.material.icons.filled.Apps
 import androidx.compose.material.icons.filled.DeleteSweep
 import androidx.compose.material.icons.filled.Folder
@@ -8,7 +9,7 @@ import androidx.compose.material.icons.filled.Memory
 import androidx.compose.material.icons.filled.ScreenShare
 import androidx.compose.ui.graphics.vector.ImageVector
 
-/** The five primary tabs, mirroring the feature set of the app. */
+/** The primary tabs, mirroring the feature set of the app. */
 enum class Destination(
     val route: String,
     val label: String,
@@ -19,6 +20,7 @@ enum class Destination(
     Files("files", "Files", Icons.Filled.Folder),
     Debloat("debloat", "Debloat", Icons.Filled.DeleteSweep),
     Mirror("mirror", "Mirror", Icons.Filled.ScreenShare),
+    Logs("logs", "Logs", Icons.AutoMirrored.Filled.Article),
     ;
 
     companion object {

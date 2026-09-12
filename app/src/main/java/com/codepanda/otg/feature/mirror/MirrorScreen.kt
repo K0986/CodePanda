@@ -58,10 +58,10 @@ fun MirrorScreen(viewModel: MirrorViewModel = viewModel()) {
     val snackbar = remember { SnackbarHostState() }
     var mode by remember { mutableStateOf(MirrorMode.SCREENSHOT) }
 
-    LaunchedEffect(viewModel.status) {
-        viewModel.status?.let {
+    LaunchedEffect(viewModel.message) {
+        viewModel.message?.let {
             snackbar.showSnackbar(it)
-            viewModel.consumeStatus()
+            viewModel.consumeMessage()
         }
     }
 
@@ -117,7 +117,7 @@ private fun ScreenshotPane(viewModel: MirrorViewModel, context: android.content.
                     subtitle = "Tap Capture to grab the device screen.",
                     icon = Icons.Filled.CameraAlt,
                 )
-                is Async.Loading -> LoadingBox("Capturing…")
+                is Async.Idle, is Async.Loading -> LoadingBox("Capturing…")
                 is Async.Failure -> MessageBox("Capture failed", shot.message)
                 is Async.Success -> Image(
                     bitmap = shot.data,
@@ -155,6 +155,14 @@ private fun LivePane(viewModel: MirrorViewModel) {
                     style = MaterialTheme.typography.bodyMedium,
                 )
             }
+        }
+        viewModel.mirrorStatus?.let { status ->
+            Text(
+                status,
+                Modifier.padding(horizontal = 12.dp, vertical = 4.dp),
+                color = if (viewModel.mirroring) PandaCyan else PandaRed,
+                style = MaterialTheme.typography.labelMedium,
+            )
         }
         Box(
             Modifier.fillMaxSize().padding(12.dp),
