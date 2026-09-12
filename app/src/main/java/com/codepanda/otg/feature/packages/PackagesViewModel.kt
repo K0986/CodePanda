@@ -6,54 +6,63 @@ import android.provider.OpenableColumns
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
-import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.codepanda.otg.core.session.SessionManager
+import com.codepanda.otg.core.session.Transfer
+import com.codepanda.otg.core.session.TransferDirection
 import com.codepanda.otg.ui.Async
+import com.codepanda.otg.ui.SessionViewModel
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.flowOf
+import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import java.io.File
 import java.io.FileOutputStream
 
-class PackagesViewModel : ViewModel() {
+@OptIn(ExperimentalCoroutinesApi::class)
+class PackagesViewModel : SessionViewModel() {
 
-    var state by mutableStateOf<Async<List<AppPackage>>>(Async.Loading)
-        private set
+    /** The package list, cached in the session so tab switches are free. */
+    val packages: StateFlow<Async<List<AppPackage>>> = SessionManager.session
+        .flatMapLatest { it?.packageStore?.state ?: flowOf(Async.Idle) }
+        .stateIn(viewModelScope, SharingStarted.Eagerly, Async.Idle)
+
+    val transfers: StateFlow<List<Transfer>> = SessionManager.session
+        .flatMapLatest { it?.transfers?.transfers ?: flowOf(emptyList()) }
+        .stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
+
     var filter by mutableStateOf(PackageFilter.USER)
         private set
     var query by mutableStateOf("")
-        private set
-    var message by mutableStateOf<String?>(null)
-    var busy by mutableStateOf(false)
         private set
 
     /** Details shown in the inspector sheet, or null when closed. */
     var details by mutableStateOf<Async<AppPackageDetails>?>(null)
         private set
 
-    private val repo get() = SessionManager.session?.packages
-
     init {
-        load()
-    }
-
-    fun load() {
-        val repo = repo ?: run { state = Async.Failure("Not connected"); return }
         viewModelScope.launch {
-            state = Async.Loading
-            state = try {
-                Async.Success(repo.listPackages())
-            } catch (t: Throwable) {
-                Async.Failure(t.message ?: "Failed to list packages")
-            }
+            SessionManager.session.collect { it?.packageStore?.ensureLoaded() }
         }
     }
 
-    fun updateFilter(value: PackageFilter) { filter = value }
-    fun updateQuery(value: String) { query = value }
-    fun consumeMessage() { message = null }
+    fun refresh() {
+        session?.packageStore?.refresh()
+    }
+
+    fun updateFilter(value: PackageFilter) {
+        filter = value
+    }
+
+    fun updateQuery(value: String) {
+        query = value
+    }
 
     fun filtered(): List<AppPackage> {
-        val list = (state as? Async.Success)?.data ?: return emptyList()
+        val list = packages.value.dataOrNull ?: return emptyList()
         return list.filter { pkg ->
             val matchesFilter = when (filter) {
                 PackageFilter.ALL -> true
@@ -68,70 +77,102 @@ class PackagesViewModel : ViewModel() {
     }
 
     fun openDetails(pkg: AppPackage) {
-        val repo = repo ?: return
+        val active = session ?: run {
+            message = "Not connected to a device"
+            return
+        }
         details = Async.Loading
-        viewModelScope.launch {
+        active.scope.launch {
             details = try {
-                Async.Success(repo.getDetails(pkg.packageName))
+                Async.Success(active.packages.getDetails(pkg.packageName))
             } catch (t: Throwable) {
                 Async.Failure(t.message ?: "Failed to load details")
             }
         }
     }
 
-    fun closeDetails() { details = null }
+    fun closeDetails() {
+        details = null
+    }
 
     // ---- actions -----------------------------------------------------------
 
-    fun setEnabled(pkg: AppPackage, enabled: Boolean) = runAction {
-        repo?.setEnabled(pkg.packageName, enabled)?.message ?: "No session"
+    fun setEnabled(pkg: AppPackage, enabled: Boolean) =
+        operate("${if (enabled) "Enable" else "Disable"} ${pkg.packageName}") { session ->
+            val result = session.packages.setEnabled(pkg.packageName, enabled)
+            if (result.isSuccess) {
+                // Patch the cached row instead of re-reading 600 packages.
+                session.packageStore.update { list ->
+                    list.map { if (it.packageName == pkg.packageName) it.copy(enabled = enabled) else it }
+                }
+            }
+            describe(if (enabled) "Enabling ${pkg.packageName}" else "Disabling ${pkg.packageName}", result)
+        }
+
+    fun forceStop(pkg: AppPackage) = operate("Force-stop ${pkg.packageName}") { session ->
+        describe("Force-stopping ${pkg.packageName}", session.packages.forceStop(pkg.packageName))
     }
 
-    fun forceStop(pkg: AppPackage) = runAction {
-        repo?.forceStop(pkg.packageName)?.message ?: "No session"
+    fun clearData(pkg: AppPackage) = operate("Clear data of ${pkg.packageName}") { session ->
+        describe("Clearing data of ${pkg.packageName}", session.packages.clearData(pkg.packageName))
     }
 
-    fun clearData(pkg: AppPackage) = runAction {
-        repo?.clearData(pkg.packageName)?.message ?: "No session"
+    fun uninstall(pkg: AppPackage) = operate("Uninstall ${pkg.packageName}") { session ->
+        val result = session.packages.uninstall(pkg.packageName)
+        if (result.isSuccess) session.packageStore.refresh()
+        describe("Uninstalling ${pkg.packageName}", result)
     }
 
-    fun uninstall(pkg: AppPackage) = runAction {
-        repo?.uninstall(pkg.packageName)?.message ?: "No session"
-    }
-
-    fun extractApk(context: Context, pkg: AppPackage) = runAction {
-        val repo = repo ?: return@runAction "No session"
+    /** Save the APK of [pkg] to this phone, with progress. */
+    fun extractApk(context: Context, pkg: AppPackage) {
+        val active = session ?: run {
+            message = "Not connected to a device"
+            return
+        }
         val dir = File(context.getExternalFilesDir(null), "extracted-apks").apply { mkdirs() }
         val outFile = File(dir, "${pkg.packageName}.apk")
-        FileOutputStream(outFile).use { repo.extractApk(pkg.packageName, it) }
-        "Saved APK to ${outFile.absolutePath}"
-    }
 
-    fun install(context: Context, uri: Uri) = runAction {
-        val repo = repo ?: return@runAction "No session"
-        val resolver = context.contentResolver
-        val size = querySize(context, uri)
-        // -S streaming needs an exact length; without it the install would hang.
-        if (size <= 0) {
-            return@runAction "Could not determine the APK's size. Save it to local storage first, then retry."
-        }
-        resolver.openInputStream(uri)?.use { input ->
-            repo.installStreaming(input, size).message
-        } ?: "Could not open selected file"
-    }
-
-    private fun runAction(block: suspend () -> String) {
-        viewModelScope.launch {
-            busy = true
-            message = try {
-                block()
-            } catch (t: Throwable) {
-                t.message ?: "Operation failed"
-            } finally {
-                busy = false
+        active.transfers.start(
+            label = "${pkg.packageName}.apk",
+            direction = TransferDirection.DOWNLOAD,
+            total = 0,
+            destination = outFile.absolutePath,
+        ) { report ->
+            FileOutputStream(outFile).use { out ->
+                active.packages.extractApk(pkg.packageName, out) { progress ->
+                    report(progress.transferred, progress.total)
+                }
             }
-            load()
         }
+        message = "Extracting ${pkg.packageName}…"
+    }
+
+    /** Side-load an APK picked on this phone, with progress. */
+    fun install(context: Context, uri: Uri) {
+        val active = session ?: run {
+            message = "Not connected to a device"
+            return
+        }
+        val size = querySize(context, uri)
+        if (size <= 0) {
+            message = "Could not determine the APK's size. Copy it to local storage first, then retry."
+            return
+        }
+        val name = queryName(context, uri) ?: "app.apk"
+
+        active.transfers.start(
+            label = "Install $name",
+            direction = TransferDirection.UPLOAD,
+            total = size,
+        ) { report ->
+            val result = context.contentResolver.openInputStream(uri)?.use { input ->
+                active.packages.installStreaming(input, size) { sent, total -> report(sent, total) }
+            } ?: error("Could not open the selected file")
+
+            if (!result.isSuccess) error(result.errorText)
+            active.packageStore.refresh()
+        }
+        message = "Installing $name…"
     }
 
     private fun querySize(context: Context, uri: Uri): Long {
@@ -140,5 +181,13 @@ class PackagesViewModel : ViewModel() {
             if (index >= 0 && cursor.moveToFirst()) return cursor.getLong(index)
         }
         return -1L
+    }
+
+    private fun queryName(context: Context, uri: Uri): String? {
+        context.contentResolver.query(uri, null, null, null, null)?.use { cursor ->
+            val index = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+            if (index >= 0 && cursor.moveToFirst()) return cursor.getString(index)
+        }
+        return uri.lastPathSegment
     }
 }

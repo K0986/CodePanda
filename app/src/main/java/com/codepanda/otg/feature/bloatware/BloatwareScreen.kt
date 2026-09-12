@@ -15,6 +15,7 @@ import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.Button
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
@@ -37,6 +38,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.codepanda.otg.ui.Async
 import com.codepanda.otg.ui.components.ConfirmDialog
@@ -53,6 +55,8 @@ import com.codepanda.otg.ui.theme.PandaTextMuted
 fun BloatwareScreen(viewModel: BloatwareViewModel = viewModel()) {
     val snackbar = remember { SnackbarHostState() }
     var uninstallTarget by remember { mutableStateOf<BloatApp?>(null) }
+
+    val apps by viewModel.apps.collectAsStateWithLifecycle()
 
     LaunchedEffect(viewModel.message) {
         viewModel.message?.let {
@@ -84,9 +88,13 @@ fun BloatwareScreen(viewModel: BloatwareViewModel = viewModel()) {
                 )
             }
 
-            when (val state = viewModel.state) {
-                is Async.Loading -> LoadingBox("Scanning system apps…")
-                is Async.Failure -> MessageBox("Couldn't scan", state.message)
+            when (val state = apps) {
+                is Async.Idle, is Async.Loading -> LoadingBox("Scanning system apps…")
+                is Async.Failure -> MessageBox(
+                    title = "Couldn't scan",
+                    subtitle = state.message,
+                    action = { Button(onClick = viewModel::refresh) { Text("Retry") } },
+                )
                 is Async.Success -> {
                     val list = viewModel.filtered()
                     if (list.isEmpty()) {

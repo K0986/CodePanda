@@ -22,6 +22,7 @@ import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.DriveFileRenameOutline
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Upload
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.DropdownMenu
@@ -35,6 +36,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.Button
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -49,11 +51,13 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.codepanda.otg.ui.Async
 import com.codepanda.otg.ui.components.ConfirmDialog
 import com.codepanda.otg.ui.components.LoadingBox
 import com.codepanda.otg.ui.components.MessageBox
+import com.codepanda.otg.ui.components.TransferRow
 import com.codepanda.otg.ui.theme.PandaCyan
 import com.codepanda.otg.ui.theme.PandaRed
 import com.codepanda.otg.ui.theme.PandaTextMuted
@@ -70,9 +74,13 @@ fun FilesScreen(viewModel: FilesViewModel = viewModel()) {
     var renameTarget by remember { mutableStateOf<FileItem?>(null) }
     var deleteTarget by remember { mutableStateOf<FileItem?>(null) }
 
+    val currentPath by viewModel.currentPath.collectAsStateWithLifecycle()
+    val listing by viewModel.listing.collectAsStateWithLifecycle()
+    val transfers by viewModel.transfers.collectAsStateWithLifecycle()
+
     val pushPicker = rememberLauncherForActivityResult(
         ActivityResultContracts.GetContent(),
-    ) { uri -> if (uri != null) viewModel.push(context, uri) }
+    ) { uri -> if (uri != null) viewModel.upload(context, uri) }
 
     LaunchedEffect(viewModel.message) {
         viewModel.message?.let {
@@ -93,13 +101,32 @@ fun FilesScreen(viewModel: FilesViewModel = viewModel()) {
     ) { padding ->
         Column(Modifier.fillMaxSize().padding(padding)) {
             PathBar(
-                path = viewModel.currentPath,
+                path = currentPath,
                 onUp = viewModel::goUp,
                 onNewFolder = { showNewFolder = true },
+                onRefresh = viewModel::refresh,
             )
-            when (val state = viewModel.state) {
-                is Async.Loading -> LoadingBox("Listing ${viewModel.currentPath}…")
-                is Async.Failure -> MessageBox("Couldn't open folder", state.message)
+
+            // Transfers live in the session, so they keep running (and keep
+            // reporting progress) even if the user leaves this screen.
+            transfers.forEach { transfer ->
+                TransferRow(
+                    transfer = transfer,
+                    onCancel = viewModel::cancelTransfer,
+                    onDismiss = viewModel::dismissTransfer,
+                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp),
+                )
+            }
+
+            when (val state = listing) {
+                is Async.Idle, is Async.Loading -> LoadingBox("Listing $currentPath…")
+                is Async.Failure -> MessageBox(
+                    title = "Couldn't open folder",
+                    subtitle = state.message,
+                    action = {
+                        Button(onClick = viewModel::refresh) { Text("Retry") }
+                    },
+                )
                 is Async.Success -> {
                     if (state.data.isEmpty()) {
                         MessageBox("Empty folder", "Nothing to show here.")
@@ -109,7 +136,7 @@ fun FilesScreen(viewModel: FilesViewModel = viewModel()) {
                                 FileRow(
                                     item = item,
                                     onOpen = { viewModel.navigateInto(item) },
-                                    onPull = { viewModel.pull(context, item) },
+                                    onPull = { viewModel.download(context, item) },
                                     onDelete = { deleteTarget = item },
                                     onRename = { renameTarget = item },
                                 )
@@ -151,7 +178,12 @@ fun FilesScreen(viewModel: FilesViewModel = viewModel()) {
 }
 
 @Composable
-private fun PathBar(path: String, onUp: () -> Unit, onNewFolder: () -> Unit) {
+private fun PathBar(
+    path: String,
+    onUp: () -> Unit,
+    onNewFolder: () -> Unit,
+    onRefresh: () -> Unit,
+) {
     Row(
         Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 6.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -167,6 +199,9 @@ private fun PathBar(path: String, onUp: () -> Unit, onNewFolder: () -> Unit) {
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
         )
+        IconButton(onClick = onRefresh) {
+            Icon(Icons.Filled.Refresh, "Refresh", tint = PandaCyan)
+        }
         IconButton(onClick = onNewFolder) {
             Icon(Icons.Filled.CreateNewFolder, "New folder", tint = PandaCyan)
         }

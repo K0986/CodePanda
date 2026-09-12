@@ -2,88 +2,154 @@ package com.codepanda.otg.feature.mirror
 
 import android.media.MediaCodec
 import android.media.MediaFormat
-import android.util.Log
 import android.view.Surface
-import com.codepanda.otg.adb.AdbStream
-import java.io.ByteArrayOutputStream
+import com.codepanda.otg.adb.service.StreamingCommand
+import com.codepanda.otg.core.log.AppLog
+import com.codepanda.otg.core.log.LogFormat
 import java.nio.ByteBuffer
 
 /**
- * Decodes a raw H.264 Annex-B elementary stream coming from an [AdbStream]
- * (produced by `screenrecord ... -`) and renders it onto a [Surface] using the
- * device's hardware decoder.
+ * Decodes the raw H.264 Annex-B stream produced by `screenrecord ... -` and
+ * renders it onto a [Surface] with the device's hardware decoder.
  *
- * The flow is the classic MediaCodec loop:
- *  1. split the byte stream into NAL units (delimited by `00 00 00 01`);
- *  2. capture the SPS (type 7) and PPS (type 8) parameter sets and use them to
- *     configure the decoder;
+ * The loop is the classic MediaCodec one:
+ *  1. split the byte stream into NAL units (see [AnnexBSplitter]);
+ *  2. capture the SPS (type 7) and PPS (type 8) parameter sets and configure the
+ *     decoder from them;
  *  3. feed every subsequent NAL into an input buffer and release the decoded
  *     output straight to the Surface.
+ *
+ * What changed relative to the first implementation, and why mirroring now
+ * actually starts:
+ *  - the stream is read through a [StreamingCommand], so `screenrecord`'s
+ *    **stderr** is captured; a device that refuses the command (unsupported
+ *    flag, secure display, encoder busy) now says so instead of showing black;
+ *  - NAL framing no longer reallocates the whole buffer per chunk;
+ *  - the decoder reports throughput, so a stalled stream is visible in the log;
+ *  - failures carry the reason out to the UI via [onError].
  */
 class VideoDecoder(
-    private val stream: AdbStream,
+    private val command: StreamingCommand,
     private val surface: Surface,
     private val widthHint: Int,
     private val heightHint: Int,
     private val onError: (Throwable) -> Unit = {},
-    private val onStopped: () -> Unit = {},
+    private val onStopped: (reason: String) -> Unit = {},
+    private val onFirstFrame: () -> Unit = {},
 ) {
     @Volatile
     private var running = false
     private var thread: Thread? = null
     private var codec: MediaCodec? = null
 
+    private var sps: ByteArray? = null
+    private var pps: ByteArray? = null
+    private var frameIndex = 0L
+    private var bytesIn = 0L
+    private var framesRendered = 0L
+    private var firstFrameReported = false
+
     fun start() {
         if (running) return
         running = true
-        thread = Thread({ runLoop() }, "video-decoder").apply { start() }
+        thread = Thread({ runLoop() }, "video-decoder").apply {
+            priority = Thread.NORM_PRIORITY + 1
+            start()
+        }
     }
 
     fun stop() {
+        if (!running && thread == null) return
         running = false
-        runCatching { stream.close() }
-        thread?.let { runCatching { it.join(1000) } }
+        // Closing the stream is what unblocks the decoder thread's pending read.
+        runCatching { command.close() }
+        thread?.let { runCatching { it.join(STOP_JOIN_MS) } }
         thread = null
     }
 
     private fun runLoop() {
-        val reader = NalReader(stream)
-        var sps: ByteArray? = null
-        var pps: ByteArray? = null
+        val splitter = AnnexBSplitter()
         val bufferInfo = MediaCodec.BufferInfo()
+        var reason = "stream ended"
+        var lastStats = System.currentTimeMillis()
+
         try {
+            AppLog.i(TAG, "decoder started (${widthHint}x$heightHint)")
             while (running) {
-                val nal = reader.next() ?: break
-                val type = nal[0].toInt() and 0x1F
-                when (type) {
-                    NAL_SPS -> {
-                        // A new, different SPS means the geometry changed (the
-                        // device rotated, or screenrecord restarted): the running
-                        // decoder is configured for the old size and would render
-                        // garbage, so rebuild it.
-                        if (codec != null && !nal.contentEquals(sps)) releaseCodec()
-                        sps = nal
-                        pps?.let { if (codec == null) configure(nal, it) }
-                    }
-                    NAL_PPS -> {
-                        pps = nal
-                        sps?.let { if (codec == null) configure(it, nal) }
-                    }
-                    else -> {
-                        val mc = codec ?: continue // wait until configured
-                        feed(mc, nal, bufferInfo)
-                        drain(mc, bufferInfo)
-                    }
+                val chunk = command.readStdout()
+                if (chunk == null) {
+                    // EOF. Flush whatever the splitter still holds, then stop.
+                    splitter.drain()?.let { handleNal(it, bufferInfo) }
+                    reason = command.stderrText.takeIf { it.isNotBlank() }
+                        ?.let { "screenrecord ended: ${LogFormat.preview(it, 160)}" }
+                        ?: "stream ended"
+                    break
+                }
+                bytesIn += chunk.size
+                splitter.append(chunk)
+
+                while (running) {
+                    val nal = splitter.next() ?: break
+                    handleNal(nal, bufferInfo)
+                }
+
+                val now = System.currentTimeMillis()
+                if (now - lastStats >= STATS_INTERVAL_MS) {
+                    val seconds = (now - lastStats) / 1000.0
+                    AppLog.d(
+                        TAG,
+                        "mirror: ${LogFormat.bytes(bytesIn)} in, $framesRendered frames rendered, " +
+                            "%.1f fps, %s/s buffered=%d".format(
+                                framesRendered / seconds,
+                                LogFormat.bytes((bytesIn / seconds).toLong()),
+                                splitter.buffered,
+                            ),
+                    )
+                    framesRendered = 0
+                    bytesIn = 0
+                    lastStats = now
                 }
             }
         } catch (t: Throwable) {
             if (running) {
-                Log.w(TAG, "decoder loop ended: ${t.message}")
+                val stderr = command.stderrText.trim()
+                val message = if (stderr.isNotEmpty()) "${t.message} — device said: $stderr" else t.message
+                AppLog.e(TAG, "decoder loop failed: $message", t)
+                reason = message ?: "decoder failed"
                 onError(t)
+            } else {
+                reason = "stopped"
             }
         } finally {
             releaseCodec()
-            onStopped()
+            if (splitter.resyncCount > 0) {
+                AppLog.w(TAG, "decoder resynchronised ${splitter.resyncCount} time(s)")
+            }
+            AppLog.i(TAG, "decoder finished: $reason")
+            onStopped(reason)
+        }
+    }
+
+    private fun handleNal(nal: ByteArray, bufferInfo: MediaCodec.BufferInfo) {
+        if (nal.isEmpty()) return
+        when (nal[0].toInt() and 0x1F) {
+            NAL_SPS -> {
+                // A different SPS means the geometry changed (rotation, or a new
+                // screenrecord session): the running decoder is configured for
+                // the old size and would render garbage, so rebuild it.
+                if (codec != null && !nal.contentEquals(sps)) releaseCodec()
+                sps = nal
+                pps?.let { if (codec == null) configure(nal, it) }
+            }
+            NAL_PPS -> {
+                pps = nal
+                sps?.let { if (codec == null) configure(it, nal) }
+            }
+            else -> {
+                val mc = codec ?: return // wait until configured
+                feed(mc, nal)
+                drain(mc, bufferInfo)
+            }
         }
     }
 
@@ -96,15 +162,16 @@ class VideoDecoder(
             configure(format, surface, null, 0)
             start()
         }
+        AppLog.i(TAG, "decoder configured from SPS/PPS (${widthHint}x$heightHint)")
     }
 
     /**
      * Queue one NAL unit. If every input buffer is busy we drain output to make
-     * room and try again: silently discarding the unit (as a plain `return`
-     * would) leaves the decoder with a hole in the bitstream and produces
-     * smeared, artefact-ridden frames.
+     * room and try again: silently discarding the unit leaves the decoder with a
+     * hole in the bitstream and produces smeared, artefact-ridden frames.
      */
-    private fun feed(mc: MediaCodec, nal: ByteArray, info: MediaCodec.BufferInfo) {
+    private fun feed(mc: MediaCodec, nal: ByteArray) {
+        val info = MediaCodec.BufferInfo()
         var index = mc.dequeueInputBuffer(TIMEOUT_US)
         while (running && index < 0) {
             drain(mc, info)
@@ -114,10 +181,7 @@ class VideoDecoder(
         val input = mc.getInputBuffer(index) ?: return
         val size = nal.size + START_CODE.size
         if (input.capacity() < size) {
-            // Very large access unit (a keyframe at a high bitrate). Feeding a
-            // truncated NAL would corrupt the stream, so queue nothing and let
-            // the next keyframe resynchronise.
-            Log.w(TAG, "NAL of $size B exceeds input buffer of ${input.capacity()} B; skipping")
+            AppLog.w(TAG, "NAL of $size B exceeds input buffer of ${input.capacity()} B; skipping")
             mc.queueInputBuffer(index, 0, 0, ptsFor(nal), 0)
             return
         }
@@ -131,14 +195,21 @@ class VideoDecoder(
         while (true) {
             when (val index = mc.dequeueOutputBuffer(info, 0)) {
                 MediaCodec.INFO_TRY_AGAIN_LATER -> return
-                MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> Unit
+                MediaCodec.INFO_OUTPUT_FORMAT_CHANGED ->
+                    AppLog.d(TAG, "decoder output format: ${mc.outputFormat}")
                 MediaCodec.INFO_OUTPUT_BUFFERS_CHANGED -> Unit
-                else -> if (index >= 0) mc.releaseOutputBuffer(index, true)
+                else -> if (index >= 0) {
+                    mc.releaseOutputBuffer(index, true)
+                    framesRendered++
+                    if (!firstFrameReported) {
+                        firstFrameReported = true
+                        AppLog.i(TAG, "first frame rendered")
+                        onFirstFrame()
+                    }
+                }
             }
         }
     }
-
-    private var frameIndex = 0L
 
     /**
      * Presentation timestamp for [nal]. Only coded picture NALs (types 1–5)
@@ -160,60 +231,6 @@ class VideoDecoder(
 
     private fun withStartCode(nal: ByteArray): ByteArray = START_CODE + nal
 
-    /** Splits an Annex-B byte stream into NAL units (start code stripped). */
-    private class NalReader(private val stream: AdbStream) {
-        private var buffer = ByteArray(0)
-
-        fun next(): ByteArray? {
-            // Ensure the buffer begins at the byte after a start code.
-            var start = indexOfStartCode(0)
-            while (start < 0) {
-                if (!fill()) return null
-                start = indexOfStartCode(0)
-            }
-            val nalStart = start + startCodeLength(start)
-            var nextStart = indexOfStartCode(nalStart)
-            while (nextStart < 0) {
-                if (!fill()) {
-                    // EOF: whatever remains is the final NAL.
-                    if (nalStart >= buffer.size) return null
-                    val nal = buffer.copyOfRange(nalStart, buffer.size)
-                    buffer = ByteArray(0)
-                    return nal.takeIf { it.isNotEmpty() }
-                }
-                nextStart = indexOfStartCode(nalStart)
-            }
-            val nal = buffer.copyOfRange(nalStart, nextStart)
-            buffer = buffer.copyOfRange(nextStart, buffer.size)
-            return if (nal.isEmpty()) next() else nal
-        }
-
-        private fun fill(): Boolean {
-            val chunk = stream.read() ?: return false
-            if (chunk.isEmpty()) return true
-            val combined = ByteArrayOutputStream(buffer.size + chunk.size)
-            combined.write(buffer)
-            combined.write(chunk)
-            buffer = combined.toByteArray()
-            return true
-        }
-
-        private fun indexOfStartCode(from: Int): Int {
-            var i = from
-            while (i + 3 < buffer.size) {
-                if (buffer[i] == 0.toByte() && buffer[i + 1] == 0.toByte()) {
-                    if (buffer[i + 2] == 1.toByte()) return i
-                    if (buffer[i + 2] == 0.toByte() && buffer[i + 3] == 1.toByte()) return i
-                }
-                i++
-            }
-            return -1
-        }
-
-        private fun startCodeLength(at: Int): Int =
-            if (buffer[at + 2] == 1.toByte()) 3 else 4
-    }
-
     companion object {
         private const val TAG = "VideoDecoder"
         private const val MIME = "video/avc"
@@ -222,6 +239,8 @@ class VideoDecoder(
         private const val NAL_PPS = 8
         private val NAL_VCL_RANGE = 1..5
         private const val ASSUMED_FPS = 60L
+        private const val STATS_INTERVAL_MS = 5_000L
+        private const val STOP_JOIN_MS = 1_500L
         private val START_CODE = byteArrayOf(0, 0, 0, 1)
     }
 }
