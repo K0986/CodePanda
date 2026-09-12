@@ -13,6 +13,7 @@ import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.content.ContextCompat
 import com.codepanda.otg.core.AppGraph
+import com.codepanda.otg.core.log.AppLog
 import com.codepanda.otg.ui.AppRoot
 import com.codepanda.otg.ui.theme.CodePandaTheme
 
@@ -29,6 +30,7 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+        AppLog.install(this)
         AppGraph.init(this)
         requestNotificationPermissionIfNeeded()
         handleAttachIntent(intent)
@@ -49,6 +51,7 @@ class MainActivity : ComponentActivity() {
     private fun handleAttachIntent(intent: Intent?) {
         if (intent?.action != UsbManager.ACTION_USB_DEVICE_ATTACHED) return
         val device = extractDevice(intent) ?: return
+        AppLog.i("MainActivity", "Launched by USB attach: ${device.deviceName}")
         AppGraph.usbManager.connect(device)
     }
 
